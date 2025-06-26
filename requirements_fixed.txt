@@ -1,0 +1,14 @@
+openai==1.12.0
+chromadb==0.4.22
+sentence-transformers==2.7.0
+streamlit==1.32.0
+pandas==2.2.1
+numpy==1.26.4
+python-dotenv==1.0.1
+tiktoken==0.6.0
+langchain==0.1.11
+langchain-community==0.0.25
+faiss-cpu==1.7.4
+huggingface_hub>=0.20.0,<1.0.0
+transformers>=4.35.0
+torch>=2.0.0 
