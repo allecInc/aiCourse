@@ -8,13 +8,15 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # 複製requirements文件
 COPY requirements_fixed.txt .
 
-# 安裝Python依賴
-RUN pip install --no-cache-dir --only-binary=all -r requirements_fixed.txt
+# 升級pip並安裝依賴
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements_fixed.txt
 
 # 複製應用程式文件
 COPY . .
@@ -26,6 +28,11 @@ RUN mkdir -p chroma_db
 ENV PYTHONPATH=/app
 ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 ENV STREAMLIT_SERVER_PORT=8501
+ENV TRANSFORMERS_CACHE=/app/.cache/transformers
+ENV HF_HOME=/app/.cache/huggingface
+
+# 創建快取目錄
+RUN mkdir -p /app/.cache/transformers /app/.cache/huggingface
 
 # 暴露端口
 EXPOSE 8501

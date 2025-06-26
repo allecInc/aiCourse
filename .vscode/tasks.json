@@ -1,0 +1,57 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "安裝依賴",
+            "type": "shell",
+            "command": "pip",
+            "args": ["install", "-r", "requirements_fixed.txt"],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "初始化資料庫",
+            "type": "shell",
+            "command": "python",
+            "args": ["setup_database.py"],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "啟動應用程式",
+            "type": "shell",
+            "command": "streamlit",
+            "args": ["run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "完整設置並啟動",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "安裝依賴",
+                "初始化資料庫",
+                "啟動應用程式"
+            ],
+            "group": "build"
+        }
+    ]
+} 
