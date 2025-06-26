@@ -11,10 +11,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 複製requirements文件
-COPY requirements.txt .
+COPY requirements_fixed.txt .
 
 # 安裝Python依賴
-RUN pip install --no-cache-dir --only-binary=all -r requirements.txt
+RUN pip install --no-cache-dir --only-binary=all -r requirements_fixed.txt
 
 # 複製應用程式文件
 COPY . .
