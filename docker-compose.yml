@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  ai-course-recommender:
+    build: .
+    container_name: ai-course-recommender
+    ports:
+      - "8501:8501"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./chroma_db:/app/chroma_db
+      - ./AI課程.json:/app/AI課程.json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - ai-course-network
+
+networks:
+  ai-course-network:
+    driver: bridge 
