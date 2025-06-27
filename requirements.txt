@@ -8,4 +8,10 @@ python-dotenv==1.0.1
 tiktoken==0.6.0
 langchain==0.1.11
 langchain-community==0.0.25
-faiss-cpu==1.7.4 
+faiss-cpu==1.7.4
+# API服務依賴
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+pydantic==2.6.3
+requests==2.31.0
+schedule==1.2.0 

@@ -119,6 +119,11 @@ class VectorStore:
     def search_similar_courses(self, query: str, k: int = None) -> List[Dict[str, Any]]:
         """搜尋相似的課程 - 使用混合策略（向量檢索 + 關鍵詞匹配）"""
         try:
+            # 檢查集合是否存在
+            if not self._check_collection_exists():
+                logger.error("集合不存在，需要重新初始化")
+                return []
+            
             k = k or self.config.RETRIEVAL_K
             
             # 先執行向量檢索
@@ -132,6 +137,12 @@ class VectorStore:
                 # 合併結果
                 all_results = self._merge_results(vector_results, keyword_results, k)
                 logger.info(f"查詢: '{query}' 混合搜索找到 {len(all_results)} 個相似課程")
+                
+                # 如果混合搜索仍然沒有結果，至少返回向量搜索的結果
+                if not all_results and vector_results:
+                    logger.info(f"混合搜索無結果，返回向量搜索結果: {len(vector_results)} 個課程")
+                    return vector_results
+                
                 return all_results
             
             logger.info(f"查詢: '{query}' 向量搜索找到 {len(vector_results)} 個相似課程")
@@ -247,12 +258,14 @@ class VectorStore:
             '六歲': ['六歲', '6歲'],
             '七歲': ['七歲', '7歲'],
             '瑜珈': ['瑜珈', '瑜伽'],
-            '有氧': ['有氧', '燃脂'],
+            '有氧': ['有氧', '燃脂', '減肥', '瘦身', '塑身', '雕塑', '身形', '體態', '產後', '恢復', '修復', '緊實', '線條'],
             '舞蹈': ['舞蹈', '跳舞', '韓國', '韓流', 'KPOP', 'K-POP', '流行舞', '韓國流行舞', '街舞', '爵士', '女團'],
             '武術': ['武術', '太極', '防身', '防身術', '自衛', '詠春', '抗暴', '武舞', '短兵', '技擊', '拳術', '武功'],
-            '肌力': ['肌力', '重訓'],
+            '肌力': ['肌力', '重訓', '訓練', '強化', '鍛鍊', '肌肉', '核心'],
             '球類': ['球類', '羽球', '桌球'],
-            '養生': ['養生', '保健', '調理', '太極', '氣功']
+            '養生': ['養生', '保健', '調理', '太極', '氣功'],
+            '體能': ['體能', '體力', '耐力', '健身', '運動', '活動'],
+            '伸展': ['伸展', '拉筋', '柔軟度', '靈活', '放鬆']
         }
         
         for main_key, synonyms in keyword_map.items():
@@ -299,7 +312,11 @@ class VectorStore:
             return True
         
         # 2. 如果查詢包含明確類別詞但結果不相關
-        category_keywords = ['游泳', '瑜珈', '有氧', '舞蹈', '武術', '兒童', '幼兒']
+        category_keywords = [
+            '游泳', '瑜珈', '有氧', '舞蹈', '武術', '兒童', '幼兒',
+            '減肥', '瘦身', '塑身', '雕塑', '身形', '體態', '產後', 
+            '燃脂', '訓練', '肌力', '重訓', '健身', '運動'
+        ]
         query_has_category = any(kw in query for kw in category_keywords)
         
         if query_has_category:
@@ -332,9 +349,37 @@ class VectorStore:
         
         return merged
     
-    def get_courses_by_category(self, category: str, limit: int = 10) -> List[Dict[str, Any]]:
+    def _check_collection_exists(self) -> bool:
+        """檢查集合是否存在且可用"""
+        try:
+            # 嘗試檢查集合數量
+            self.collection.count()
+            return True
+        except Exception as e:
+            logger.warning(f"集合檢查失敗: {e}")
+            try:
+                # 嘗試重新取得集合
+                self.collection = self.client.get_collection(self.config.COLLECTION_NAME)
+                self.collection.count()
+                return True
+            except Exception as e2:
+                logger.error(f"無法取得集合: {e2}")
+                return False
+    
+    def get_courses_by_category(self, category: str, limit: int = None) -> List[Dict[str, Any]]:
         """根據類別獲取課程"""
         try:
+            # 檢查集合是否存在
+            if not self._check_collection_exists():
+                logger.error("集合不存在，無法獲取課程")
+                return []
+            
+            # 如果沒有指定限制，獲取所有課程
+            if limit is None:
+                # 先獲取該類別的總數
+                total_count = self.collection.count()
+                limit = total_count if total_count > 0 else 1000  # 設定一個安全的大數字
+            
             results = self.collection.query(
                 query_texts=[f"類別: {category}"],
                 n_results=limit,
@@ -363,6 +408,14 @@ class VectorStore:
     def get_collection_stats(self) -> Dict[str, Any]:
         """獲取集合統計資訊"""
         try:
+            # 檢查集合是否存在
+            if not self._check_collection_exists():
+                logger.warning("集合不存在，返回0")
+                return {
+                    'total_courses': 0,
+                    'collection_name': self.config.COLLECTION_NAME
+                }
+            
             count = self.collection.count()
             return {
                 'total_courses': count,
@@ -370,7 +423,11 @@ class VectorStore:
             }
         except Exception as e:
             logger.error(f"獲取集合統計失敗: {e}")
-            return {}
+            # 如果集合不存在或有錯誤，返回0
+            return {
+                'total_courses': 0,
+                'collection_name': self.config.COLLECTION_NAME
+            }
     
     def reset_collection(self):
         """重置集合（慎用）"""
@@ -383,4 +440,53 @@ class VectorStore:
             logger.info("集合已重置")
         except Exception as e:
             logger.error(f"重置集合失敗: {e}")
-            raise 
+            raise
+    
+    def close_connection(self):
+        """關閉資料庫連接（Windows 檔案鎖定問題修復）"""
+        try:
+            # 嘗試各種方式關閉 ChromaDB 連接
+            if self.client:
+                try:
+                    # 嘗試關閉持久化客戶端
+                    if hasattr(self.client, '_client') and self.client._client:
+                        self.client._client.reset()
+                except:
+                    pass
+                
+                try:
+                    # 嘗試關閉客戶端
+                    if hasattr(self.client, 'reset'):
+                        self.client.reset()
+                except:
+                    pass
+                
+                try:
+                    # 嘗試直接關閉
+                    if hasattr(self.client, 'close'):
+                        self.client.close()
+                except:
+                    pass
+            
+            # 清理引用
+            self.collection = None
+            self.client = None
+            
+            # 強制垃圾回收
+            import gc
+            gc.collect()
+            
+            # 等待一下讓系統釋放檔案
+            import time
+            time.sleep(0.5)
+            
+            logger.info("已關閉向量數據庫連接")
+        except Exception as e:
+            logger.warning(f"關閉連接時出現警告: {e}")
+    
+    def __del__(self):
+        """析構函數 - 確保連接關閉"""
+        try:
+            self.close_connection()
+        except:
+            pass 

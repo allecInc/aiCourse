@@ -57,12 +57,31 @@ st.markdown("""
 def initialize_rag_system():
     """初始化RAG系統（使用快取避免重複初始化）"""
     try:
+        from auto_file_monitor import get_file_monitor
+        
+        # 初始化檔案監控器
+        monitor = get_file_monitor()
+        if monitor.last_mtime is None:
+            monitor.initialize()
+        
         config = Config()
         rag_system = RAGSystem(config)
         
-        # 檢查並初始化知識庫
-        with st.spinner("正在初始化知識庫..."):
-            rag_system.initialize_knowledge_base()
+        # 檢查並初始化知識庫（讓系統自動判斷是否需要重建）
+        try:
+            with st.spinner("正在初始化知識庫..."):
+                rag_system.initialize_knowledge_base(force_rebuild=False)
+        except Exception as init_error:
+            st.warning(f"初始知識庫建立失敗: {init_error}")
+            # 嘗試強制重建
+            try:
+                st.info("嘗試強制重建知識庫...")
+                with st.spinner("正在重建知識庫..."):
+                    rag_system.initialize_knowledge_base(force_rebuild=True)
+                st.success("知識庫重建成功！")
+            except Exception as rebuild_error:
+                st.error(f"強制重建也失敗: {rebuild_error}")
+                raise
         
         return rag_system
     except Exception as e:
@@ -120,9 +139,95 @@ def main():
         st.error("無法初始化RAG系統，請檢查配置。")
         st.stop()
     
+    # 啟動時自動檢查檔案更新（只在第一次載入時執行）
+    if 'auto_check_done' not in st.session_state:
+        from auto_file_monitor import check_and_update_data
+        try:
+            update_result = check_and_update_data()
+            if update_result['updated']:
+                st.info("🔄 檢測到資料檔案更新，正在重新載入...")
+                st.cache_resource.clear()
+                st.rerun()
+        except Exception as e:
+            st.warning(f"自動更新檢查失敗: {e}")
+        finally:
+            st.session_state['auto_check_done'] = True
+    
+
+    
     # 側邊欄
     with st.sidebar:
         st.header("⚙️ 系統設定")
+        
+        # 檔案上傳功能
+        st.subheader("📁 檔案上傳")
+        uploaded_file = st.file_uploader(
+            "上傳新的課程資料檔案",
+            type=['json'],
+            help="請上傳新的 AI課程.json 檔案來更新課程資料"
+        )
+        
+        if uploaded_file is not None:
+            try:
+                # 讀取上傳的檔案內容
+                file_content = uploaded_file.read()
+                
+                # 驗證JSON格式
+                import json
+                json_data = json.loads(file_content.decode('utf-8'))
+                
+                # 顯示檔案資訊
+                st.success(f"✅ 檔案讀取成功")
+                st.info(f"📄 檔案名稱: {uploaded_file.name}")
+                st.info(f"📊 檔案大小: {len(file_content)} bytes")
+                
+                # 嘗試計算課程數量
+                if isinstance(json_data, list):
+                    course_count = len(json_data)
+                    st.info(f"📚 包含課程數: {course_count}")
+                elif isinstance(json_data, dict) and 'courses' in json_data:
+                    course_count = len(json_data['courses'])
+                    st.info(f"📚 包含課程數: {course_count}")
+                else:
+                    st.warning("⚠️ 無法識別課程數量，請確認檔案格式")
+                
+                # 替換檔案按鈕
+                if st.button("🔄 替換現有檔案並重建資料庫", type="primary"):
+                    try:
+                        # 備份原始檔案
+                        import shutil
+                        from datetime import datetime
+                        backup_name = f"AI課程.json.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        shutil.copy2("AI課程.json", backup_name)
+                        st.info(f"✅ 原檔案已備份為: {backup_name}")
+                        
+                        # 寫入新檔案
+                        with open("AI課程.json", "wb") as f:
+                            f.write(file_content)
+                        
+                        st.success("✅ 檔案已成功替換")
+                        
+                        # 強制重建資料庫
+                        with st.spinner("重建資料庫中..."):
+                            from auto_file_monitor import force_rebuild_database
+                            rebuild_result = force_rebuild_database()
+                            
+                            if rebuild_result['success']:
+                                st.success("✅ 資料庫重建完成！")
+                                st.balloons()  # 顯示慶祝動畫
+                                st.rerun()  # 重新載入頁面
+                            else:
+                                st.error(f"❌ 資料庫重建失敗: {rebuild_result['message']}")
+                                
+                    except Exception as e:
+                        st.error(f"❌ 檔案替換失敗: {e}")
+                        
+            except json.JSONDecodeError as e:
+                st.error(f"❌ JSON格式錯誤: {e}")
+            except Exception as e:
+                st.error(f"❌ 檔案處理失敗: {e}")
+        
+        st.divider()
         
         # API金鑰設定
         api_key = st.text_input(
@@ -153,11 +258,46 @@ def main():
         st.metric("總課程數", stats.get('total_courses', 0))
         st.metric("課程類別數", stats.get('total_categories', 0))
         
+        # 資料檔案資訊
+        st.subheader("📄 資料檔案資訊")
+        st.write(f"**檔案大小**: {stats.get('data_file_size', '未知')}")
+        st.write(f"**最後修改**: {stats.get('data_file_last_modified', '未知')}")
+        st.write(f"**最後檢查**: {stats.get('last_update_check', '未知')}")
+        
+        # 自動更新檢查
+        from auto_file_monitor import check_and_update_data, get_file_monitor, force_rebuild_database
+        
+        # 手動更新按鈕
+        if st.button("🔄 檢查資料更新", help="點擊檢查資料檔案是否有更新"):
+            with st.spinner("檢查資料更新中..."):
+                update_result = check_and_update_data()
+                if update_result['updated']:
+                    st.success(f"✅ {update_result['message']}")
+                    st.rerun()  # 重新載入頁面
+                else:
+                    st.info(f"ℹ️ {update_result['message']}")
+        
+        # 強制重建按鈕
+        if st.button("🔄 強制重建資料庫", help="強制重建資料庫並清理快取"):
+            with st.spinner("重建資料庫中..."):
+                rebuild_result = force_rebuild_database()
+                if rebuild_result['success']:
+                    st.success(f"✅ {rebuild_result['message']}")
+                    st.rerun()
+                else:
+                    st.error(f"❌ {rebuild_result['message']}")
+        
         # 顯示所有類別
         if st.checkbox("顯示所有類別"):
             categories = stats.get('categories', [])
             for category in categories:
                 st.write(f"• {category}")
+        
+        # 快取清理選項
+        st.divider()
+        if st.button("🔄 清理快取並重新載入", help="如果遇到方法錯誤，點擊此按鈕清理快取"):
+            st.cache_resource.clear()
+            st.rerun()
     
     # 主要內容區域
     tab1, tab2, tab3 = st.tabs(["🔍 智能推薦", "📚 瀏覽課程", "ℹ️ 關於系統"])
@@ -166,12 +306,9 @@ def main():
         st.header("智能課程推薦")
         st.write("請描述您想要的課程類型或需求，我會為您推薦最適合的課程。")
         
-        # 查詢輸入
-        query = st.text_input(
-            "請輸入您的需求",
-            placeholder="例如：我想要減肥燃脂的課程、適合初學者的瑜珈課程、能夠增強體力的運動課程...",
-            key="query_input"
-        )
+        # 初始化查詢狀態
+        if 'query_text' not in st.session_state:
+            st.session_state.query_text = ""
         
         # 範例查詢按鈕
         st.write("**快速範例：**")
@@ -184,21 +321,24 @@ def main():
             "⚽ 球類運動": "球類運動課程"
         }
         
-        # 初始化selected_example
-        if 'selected_example' not in st.session_state:
-            st.session_state.selected_example = None
-        
         cols = [col1, col2, col3, col4]
         for i, (button_text, example_query) in enumerate(example_queries.items()):
             with cols[i]:
                 if st.button(button_text, key=f"example_{i}"):
-                    st.session_state.selected_example = example_query
+                    st.session_state.query_text = example_query
                     st.rerun()
         
-        # 如果選擇了範例，自動填入查詢框
-        if st.session_state.selected_example and not query:
-            query = st.session_state.selected_example
-            st.session_state.selected_example = None  # 清除選擇
+        # 查詢輸入
+        query = st.text_input(
+            "請輸入您的需求",
+            value=st.session_state.query_text,
+            placeholder="例如：我想要減肥燃脂的課程、適合初學者的瑜珈課程、能夠增強體力的運動課程...",
+            key="query_input"
+        )
+        
+        # 同步session state
+        if query != st.session_state.query_text:
+            st.session_state.query_text = query
         
         # 搜尋按鈕
         if st.button("🔍 搜尋推薦", type="primary") and query:
@@ -234,14 +374,46 @@ def main():
         categories = rag_system.get_all_categories()
         selected_category = st.selectbox("選擇課程類別", ["全部"] + categories)
         
+        # 顯示數量選擇
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            show_all = st.checkbox("顯示該類別的所有課程", value=True)
+        with col2:
+            if not show_all:
+                max_courses = st.number_input("最多顯示課程數", min_value=1, max_value=50, value=10)
+            else:
+                max_courses = None
+        
         if selected_category and selected_category != "全部":
             with st.spinner("載入課程中..."):
-                courses = rag_system.get_courses_by_category(selected_category)
+                courses = rag_system.get_courses_by_category(selected_category, limit=max_courses)
                 
                 if courses:
-                    st.write(f"找到 {len(courses)} 個 {selected_category} 課程：")
-                    for course in courses:
-                        display_course_card(course, show_similarity=False)
+                    if show_all:
+                        st.success(f"找到 {len(courses)} 個 **{selected_category}** 類別的所有課程：")
+                    else:
+                        st.info(f"顯示 {len(courses)} 個 **{selected_category}** 課程（最多 {max_courses} 個）：")
+                    
+                    # 添加搜尋功能
+                    if len(courses) > 5:
+                        search_term = st.text_input("🔍 在此類別中搜尋課程", placeholder="輸入課程名稱或關鍵字...")
+                        if search_term:
+                            filtered_courses = [
+                                course for course in courses 
+                                if search_term.lower() in course['title'].lower() or 
+                                   search_term.lower() in course['description'].lower()
+                            ]
+                            if filtered_courses:
+                                st.write(f"搜尋到 {len(filtered_courses)} 個包含「{search_term}」的課程：")
+                                courses = filtered_courses
+                            else:
+                                st.warning(f"沒有找到包含「{search_term}」的課程")
+                                courses = []
+                    
+                    # 顯示課程
+                    for i, course in enumerate(courses, 1):
+                        with st.expander(f"{i}. {course['title']} ({course['category']})", expanded=False):
+                            display_course_card(course, show_similarity=False)
                 else:
                     st.info("此類別暫無課程資料")
         else:
