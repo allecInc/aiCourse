@@ -30,12 +30,17 @@ class VectorStore:
             
             # 初始化ChromaDB客戶端
             logger.info("初始化ChromaDB...")
+            # 創建ChromaDB設定
+            chroma_settings = Settings(
+                anonymized_telemetry=False,
+                allow_reset=True,
+                persist_directory=self.config.VECTOR_DB_PATH
+            )
+            
+            # 初始化持久化客戶端
             self.client = chromadb.PersistentClient(
                 path=self.config.VECTOR_DB_PATH,
-                settings=Settings(
-                    anonymized_telemetry=False,
-                    allow_reset=True
-                )
+                settings=chroma_settings
             )
             
             # 創建或獲取集合

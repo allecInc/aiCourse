@@ -57,7 +57,7 @@ if [ ! -f "requirements_fixed.txt" ]; then
     cp requirements.txt requirements_fixed.txt
 fi
 
-# 確保 huggingface_hub 版本正確
+# 確保相容性版本
 echo "📝 更新依賴版本以修復相容性問題..."
 if ! grep -q "huggingface_hub" requirements_fixed.txt; then
     echo "huggingface_hub>=0.23.0,<1.0.0" >> requirements_fixed.txt
@@ -69,6 +69,14 @@ fi
 
 if ! grep -q "requests" requirements_fixed.txt; then
     echo "requests>=2.31.0" >> requirements_fixed.txt
+fi
+
+# 確保 ChromaDB 版本相容
+if ! grep -q "chromadb" requirements_fixed.txt; then
+    echo "chromadb>=0.4.15,<0.5.0" >> requirements_fixed.txt
+else
+    # 替換 ChromaDB 版本
+    sed -i 's/chromadb==0.4.22/chromadb>=0.4.15,<0.5.0/' requirements_fixed.txt
 fi
 
 # 建構映像

@@ -1,5 +1,5 @@
 # 使用官方Python基礎映像
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 # 設置工作目錄
 WORKDIR /app
