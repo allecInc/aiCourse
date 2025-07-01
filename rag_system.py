@@ -423,29 +423,29 @@ class RAGSystem:
     def chat_with_user(self, session_id: str, user_message: str) -> Dict[str, Any]:
         """聊天功能 - 處理用戶的聊天消息"""
         try:
-            # 記錄用戶消息
-            self.conversation_manager.add_message(session_id, "user_message", user_message)
-            
-            # 獲取對話上下文
-            context = self.conversation_manager.get_conversation_context(session_id)
-            
             # 判斷用戶是否在詢問課程相關問題
             is_course_query = self._is_course_related_query(user_message)
             
             if is_course_query:
-                # 如果是課程相關查詢，使用RAG系統
-                result = self.get_course_recommendation(user_message, session_id=session_id)
+                # 如果是課程相關查詢，使用專門的聊天推薦方法 (已包含消息記錄)
+                result = self._get_course_recommendation_for_chat(user_message, session_id)
                 ai_response = result['recommendation']
                 courses = result.get('retrieved_courses', [])
             else:
-                # 如果是一般聊天，使用對話功能
+                # 如果是一般聊天，先記錄用戶消息，然後生成回應
+                self.conversation_manager.add_message(session_id, "user_message", user_message)
+                
+                # 獲取對話上下文
+                context = self.conversation_manager.get_conversation_context(session_id)
+                
+                # 生成聊天回應
                 ai_response = self._generate_chat_response(user_message, context)
                 courses = []
-            
-            # 記錄AI回應
-            self.conversation_manager.add_message(
-                session_id, "ai_response", ai_response, courses=courses
-            )
+                
+                # 記錄AI回應
+                self.conversation_manager.add_message(
+                    session_id, "ai_response", ai_response, courses=courses
+                )
             
             return {
                 'success': True,
@@ -466,6 +466,43 @@ class RAGSystem:
                 'ai_response': error_response,
                 'courses': [],
                 'is_course_query': False
+            }
+    
+    def _get_course_recommendation_for_chat(self, user_message: str, session_id: str) -> Dict[str, Any]:
+        """專門用於聊天的課程推薦方法"""
+        try:
+            # 記錄用戶消息為聊天消息
+            self.conversation_manager.add_message(session_id, "user_message", user_message)
+            
+            # 獲取對話上下文並優化查詢
+            refined_query = self.conversation_manager.get_refined_query(session_id, user_message)
+            
+            # 檢索相關課程
+            retrieved_courses = self.retrieve_relevant_courses(refined_query)
+            
+            if not retrieved_courses:
+                recommendation = "抱歉，我找不到符合您需求的課程。請嘗試用不同的關鍵字搜尋，例如：'有氧運動'、'瑜珈'、'游泳'、'球類運動'等。"
+            else:
+                # 生成推薦
+                recommendation = self.generate_course_recommendation(user_message, retrieved_courses, session_id)
+            
+            # 記錄AI回應為聊天回應
+            self.conversation_manager.add_message(
+                session_id, "ai_response", recommendation, courses=retrieved_courses
+            )
+            
+            return {
+                'recommendation': recommendation,
+                'retrieved_courses': retrieved_courses,
+                'success': len(retrieved_courses) > 0
+            }
+            
+        except Exception as e:
+            logger.error(f"聊天課程推薦失敗: {e}")
+            return {
+                'recommendation': "抱歉，我遇到了一些問題。請稍後再試。",
+                'retrieved_courses': [],
+                'success': False
             }
     
     def _is_course_related_query(self, message: str) -> bool:
