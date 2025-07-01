@@ -1,0 +1,102 @@
+# Python 相關
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虛擬環境
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# 環境變數檔案 (包含敏感資訊如API金鑰)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 向量資料庫檔案 (ChromaDB)
+chroma_db/
+*.sqlite3
+
+# 對話記錄檔案 (可能包含用戶個人資訊)
+conversations.json
+
+# 備份檔案
+*.backup
+*.backup_*
+*.bak
+
+# 日誌檔案
+*.log
+logs/
+
+# IDE 和編輯器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 作業系統生成的檔案
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 臨時檔案
+*.tmp
+*.temp
+temp/
+tmp/
+
+# 模型檔案 (如果有大型模型檔案)
+*.model
+*.bin
+*.safetensors
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Streamlit
+.streamlit/
+
+# 其他
+*.pid
+*.seed
+*.pid.lock 

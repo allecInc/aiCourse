@@ -7,6 +7,7 @@ from datetime import datetime
 from config import Config
 from vector_store import VectorStore
 from course_processor import CourseProcessor
+from conversation_manager import ConversationManager
 
 # 設定日誌
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +21,7 @@ class RAGSystem:
         self.vector_store = None
         self.course_processor = None
         self.openai_client = None
+        self.conversation_manager = ConversationManager()  # 新增對話管理器
         self.last_data_file_mtime = None  # 記錄資料檔案的最後修改時間
         self.setup_system()
     
@@ -124,31 +126,63 @@ class RAGSystem:
                     logger.error(f"重建後仍然失敗: {rebuild_error}")
             return []
     
-    def generate_course_recommendation(self, query: str, retrieved_courses: List[Dict[str, Any]]) -> str:
-        """使用GPT-4.1 mini生成課程推薦"""
+    def generate_course_recommendation(self, query: str, retrieved_courses: List[Dict[str, Any]], 
+                                      session_id: str = None) -> str:
+        """使用GPT-4.1 mini生成課程推薦，支援對話上下文"""
         try:
             if not retrieved_courses:
                 return "抱歉，我找不到符合您需求的課程。請嘗試用不同的關鍵字搜尋。"
             
+            # 獲取對話上下文
+            context = {}
+            if session_id:
+                context = self.conversation_manager.get_conversation_context(session_id)
+            
             # 構建系統提示
-            system_prompt = """你是一個專業的課程推薦助手。基於提供的課程資訊，為用戶推薦最適合的課程。
+            system_prompt = """你是一個專業的課程推薦助手。基於提供的課程資訊和對話歷史，為用戶推薦最適合的課程。
 
 重要原則：
 1. 只推薦提供的課程資訊中存在的課程，絕對不能虛構或推薦不存在的課程
-2. 根據用戶需求和課程匹配度進行排序推薦
-3. 提供具體且實用的推薦理由
-4. 用繁體中文回答
-5. 格式要清晰，包含課程名稱、類別、介紹和推薦理由
+2. 根據用戶需求、對話歷史和課程匹配度進行排序推薦
+3. 考慮用戶的偏好和之前拒絕的課程
+4. 提供具體且實用的推薦理由
+5. 用繁體中文回答
+6. 格式要清晰，包含課程名稱、類別、介紹和推薦理由
+7. 如果用戶有反饋或偏好，要特別注意避免推薦類似的不合適課程
 
 如果沒有找到完全匹配的課程，要誠實說明，並推薦最相近的替代選項。"""
 
             # 構建用戶查詢上下文
             context_parts = []
             context_parts.append(f"用戶查詢: {query}\n")
-            context_parts.append("相關課程資訊:")
+            
+            # 添加對話歷史和用戶偏好
+            if context:
+                if context.get("user_preferences"):
+                    context_parts.append("用戶偏好:")
+                    for pref, value in context["user_preferences"].items():
+                        if value:
+                            pref_name = pref.replace("_sensitive", "").replace("_", " ")
+                            context_parts.append(f"  - 特別關注: {pref_name}")
+                
+                if context.get("rejected_courses"):
+                    context_parts.append(f"用戶之前拒絕的課程: {len(context['rejected_courses'])} 個")
+                
+                if context.get("messages"):
+                    recent_messages = context["messages"][-3:]  # 最近3條消息
+                    context_parts.append("最近的對話:")
+                    for msg in recent_messages:
+                        if msg["type"] == "user_feedback":
+                            context_parts.append(f"  - 用戶反饋: {msg['content']}")
+            
+            context_parts.append("\n相關課程資訊:")
             
             for i, course in enumerate(retrieved_courses, 1):
-                context_parts.append(f"\n{i}. 課程名稱: {course['title']}")
+                # 檢查課程是否在拒絕列表中
+                rejected = context.get("rejected_courses", [])
+                status = " (用戶之前拒絕)" if course['title'] in rejected else ""
+                
+                context_parts.append(f"\n{i}. 課程名稱: {course['title']}{status}")
                 context_parts.append(f"   類別: {course['category']}")
                 context_parts.append(f"   介紹: {course['description']}")
                 context_parts.append(f"   相似度: {course['similarity_score']:.3f}")
@@ -165,7 +199,7 @@ class RAGSystem:
                     context_parts.append(f"   詳細資訊: {', '.join(additional_info)}")
             
             user_prompt = "\n".join(context_parts)
-            user_prompt += "\n\n請根據以上課程資訊，為用戶提供最適合的課程推薦："
+            user_prompt += "\n\n請根據以上課程資訊和對話歷史，為用戶提供最適合的課程推薦："
             
             # 呼叫GPT-4.1 mini
             response = self.openai_client.chat.completions.create(
@@ -188,13 +222,23 @@ class RAGSystem:
             logger.error(f"生成課程推薦失敗: {e}")
             return "抱歉，生成推薦時發生錯誤。請稍後再試。"
     
-    def get_course_recommendation(self, query: str, k: int = None) -> Dict[str, Any]:
+    def get_course_recommendation(self, query: str, k: int = None, session_id: str = None) -> Dict[str, Any]:
         """獲取課程推薦（完整流程）"""
         try:
             logger.info(f"開始處理查詢: {query}")
             
+            # 如果有會話ID，使用對話上下文優化查詢
+            if session_id:
+                refined_query = self.conversation_manager.get_refined_query(session_id, query)
+                logger.info(f"原始查詢: {query}")
+                logger.info(f"優化查詢: {refined_query}")
+                # 記錄用戶查詢
+                self.conversation_manager.add_message(session_id, "user_query", query)
+            else:
+                refined_query = query
+            
             # 1. 檢索相關課程
-            retrieved_courses = self.retrieve_relevant_courses(query, k)
+            retrieved_courses = self.retrieve_relevant_courses(refined_query, k)
             
             if not retrieved_courses:
                 return {
@@ -205,13 +249,21 @@ class RAGSystem:
                 }
             
             # 2. 生成推薦
-            recommendation = self.generate_course_recommendation(query, retrieved_courses)
+            recommendation = self.generate_course_recommendation(query, retrieved_courses, session_id)
+            
+            # 記錄系統回應
+            if session_id:
+                self.conversation_manager.add_message(
+                    session_id, "system_response", recommendation, 
+                    courses=retrieved_courses
+                )
             
             return {
                 'query': query,
                 'retrieved_courses': retrieved_courses,
                 'recommendation': recommendation,
-                'success': True
+                'success': True,
+                'session_id': session_id
             }
             
         except Exception as e:
@@ -366,4 +418,166 @@ class RAGSystem:
                 'updated': False,
                 'message': f'錯誤: {str(e)}',
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            } 
+            }
+    
+    def chat_with_user(self, session_id: str, user_message: str) -> Dict[str, Any]:
+        """聊天功能 - 處理用戶的聊天消息"""
+        try:
+            # 記錄用戶消息
+            self.conversation_manager.add_message(session_id, "user_message", user_message)
+            
+            # 獲取對話上下文
+            context = self.conversation_manager.get_conversation_context(session_id)
+            
+            # 判斷用戶是否在詢問課程相關問題
+            is_course_query = self._is_course_related_query(user_message)
+            
+            if is_course_query:
+                # 如果是課程相關查詢，使用RAG系統
+                result = self.get_course_recommendation(user_message, session_id=session_id)
+                ai_response = result['recommendation']
+                courses = result.get('retrieved_courses', [])
+            else:
+                # 如果是一般聊天，使用對話功能
+                ai_response = self._generate_chat_response(user_message, context)
+                courses = []
+            
+            # 記錄AI回應
+            self.conversation_manager.add_message(
+                session_id, "ai_response", ai_response, courses=courses
+            )
+            
+            return {
+                'success': True,
+                'ai_response': ai_response,
+                'courses': courses,
+                'is_course_query': is_course_query
+            }
+            
+        except Exception as e:
+            logger.error(f"聊天處理失敗: {e}")
+            error_response = "抱歉，我遇到了一些問題。請稍後再試。"
+            
+            # 記錄錯誤回應
+            self.conversation_manager.add_message(session_id, "ai_response", error_response)
+            
+            return {
+                'success': False,
+                'ai_response': error_response,
+                'courses': [],
+                'is_course_query': False
+            }
+    
+    def _is_course_related_query(self, message: str) -> bool:
+        """判斷消息是否與課程相關"""
+        course_keywords = [
+            '課程', '推薦', '學習', '教學', '訓練', '班級', '報名', '上課',
+            '減肥', '瑜珈', '游泳', '健身', '運動', '舞蹈', '音樂', '繪畫',
+            '語言', '電腦', '程式', '設計', '攝影', '烹飪', '手工', '才藝'
+        ]
+        
+        return any(keyword in message for keyword in course_keywords)
+    
+    def _generate_chat_response(self, user_message: str, context: Dict[str, Any]) -> str:
+        """生成聊天回應"""
+        try:
+            # 構建聊天提示
+            system_prompt = """你是一個友善的AI課程推薦助手。你可以：
+1. 推薦和介紹各種課程
+2. 回答關於課程的問題  
+3. 進行日常聊天
+4. 記住對話歷史並保持連貫性
+
+請用繁體中文回應，保持友善和專業的語調。如果用戶沒有明確要求課程推薦，可以進行一般對話，但要適時引導到課程相關話題。"""
+
+            # 構建對話歷史
+            chat_history = []
+            if context.get('messages'):
+                recent_messages = context['messages'][-6:]  # 最近6條消息
+                for msg in recent_messages:
+                    if msg['type'] == 'user_message':
+                        chat_history.append(f"用戶: {msg['content']}")
+                    elif msg['type'] == 'ai_response':
+                        chat_history.append(f"助手: {msg['content']}")
+            
+            # 構建完整提示
+            conversation_context = "\n".join(chat_history) if chat_history else "這是對話的開始。"
+            
+            user_prompt = f"""對話歷史:
+{conversation_context}
+
+用戶剛剛說: {user_message}
+
+請根據對話歷史給出適當的回應。如果用戶在詢問課程相關問題，可以引導他們使用更具體的描述來獲得課程推薦。"""
+
+            # 呼叫GPT
+            response = self.openai_client.chat.completions.create(
+                model=self.config.MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.8,
+                max_tokens=800,
+                top_p=0.9
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logger.error(f"生成聊天回應失敗: {e}")
+            return "我好像有點不太明白，可以換個方式說嗎？或者告訴我您想了解什麼樣的課程？"
+    
+    def handle_user_feedback(self, session_id: str, feedback_content: str, 
+                           feedback_type: str = "dissatisfied", 
+                           rejected_courses: List[str] = None,
+                           reasons: List[str] = None) -> Dict[str, Any]:
+        """處理用戶反饋"""
+        try:
+            # 記錄反饋
+            success = self.conversation_manager.add_user_feedback(
+                session_id, feedback_type, feedback_content, 
+                rejected_courses, reasons
+            )
+            
+            if not success:
+                return {
+                    'success': False,
+                    'message': '記錄反饋失敗',
+                    'followup_questions': []
+                }
+            
+            # 記錄反饋消息
+            self.conversation_manager.add_message(session_id, "user_feedback", feedback_content)
+            
+            # 生成追問問題
+            followup_questions = self.conversation_manager.generate_followup_questions(
+                session_id, feedback_content
+            )
+            
+            return {
+                'success': True,
+                'message': '感謝您的反饋！',
+                'followup_questions': followup_questions,
+                'should_ask_followup': len(followup_questions) > 0
+            }
+            
+        except Exception as e:
+            logger.error(f"處理用戶反饋失敗: {e}")
+            return {
+                'success': False,
+                'message': f'處理反饋時發生錯誤: {str(e)}',
+                'followup_questions': []
+            }
+    
+    def create_conversation_session(self, user_id: str = None) -> str:
+        """創建新的對話會話"""
+        return self.conversation_manager.create_session(user_id)
+    
+    def get_conversation_history(self, session_id: str) -> Dict[str, Any]:
+        """獲取對話歷史"""
+        return self.conversation_manager.get_conversation_context(session_id)
+    
+    def clear_conversation(self, session_id: str):
+        """清空對話歷史"""
+        self.conversation_manager.clear_session(session_id) 
