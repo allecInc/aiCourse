@@ -617,4 +617,56 @@ class RAGSystem:
     
     def clear_conversation(self, session_id: str):
         """清空對話歷史"""
-        self.conversation_manager.clear_session(session_id) 
+        self.conversation_manager.clear_session(session_id)
+    
+    def process_user_query_for_existing_message(self, session_id: str, user_message: str) -> Dict[str, Any]:
+        """處理已存在的用戶消息 - 只生成AI回應，不再次添加用戶消息"""
+        try:
+            # 判斷用戶是否在詢問課程相關問題
+            is_course_query = self._is_course_related_query(user_message)
+            
+            if is_course_query:
+                # 如果是課程相關查詢，獲取對話上下文並優化查詢
+                refined_query = self.conversation_manager.get_refined_query(session_id, user_message)
+                
+                # 檢索相關課程
+                retrieved_courses = self.retrieve_relevant_courses(refined_query)
+                
+                if not retrieved_courses:
+                    ai_response = "抱歉，我找不到符合您需求的課程。請嘗試用不同的關鍵字搜尋，例如：'有氧運動'、'瑜珈'、'游泳'、'球類運動'等。"
+                else:
+                    # 生成推薦
+                    ai_response = self.generate_course_recommendation(user_message, retrieved_courses, session_id)
+                
+                courses = retrieved_courses
+            else:
+                # 如果是一般聊天，獲取對話上下文並生成回應
+                context = self.conversation_manager.get_conversation_context(session_id)
+                ai_response = self._generate_chat_response(user_message, context)
+                courses = []
+            
+            # 記錄AI回應
+            self.conversation_manager.add_message(
+                session_id, "ai_response", ai_response, courses=courses
+            )
+            
+            return {
+                'success': True,
+                'ai_response': ai_response,
+                'courses': courses,
+                'is_course_query': is_course_query
+            }
+            
+        except Exception as e:
+            logger.error(f"處理用戶查詢失敗: {e}")
+            error_response = "抱歉，我遇到了一些問題。請稍後再試。"
+            
+            # 記錄錯誤回應
+            self.conversation_manager.add_message(session_id, "ai_response", error_response)
+            
+            return {
+                'success': False,
+                'ai_response': error_response,
+                'courses': [],
+                'is_course_query': False
+            } 

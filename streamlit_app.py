@@ -313,6 +313,12 @@ def main():
         if 'chat_input' not in st.session_state:
             st.session_state.chat_input = ""
         
+        if 'processing_ai_response' not in st.session_state:
+            st.session_state.processing_ai_response = False
+            
+        if 'just_sent_message' not in st.session_state:
+            st.session_state.just_sent_message = False
+        
         # 聊天界面
         chat_container = st.container()
         
@@ -378,6 +384,73 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
         
+        # 檢查是否需要處理AI回應（在顯示聊天歷史之後）
+        conversation_history = rag_system.get_conversation_history(st.session_state.conversation_session_id)
+        needs_ai_response = False
+        
+        if conversation_history and conversation_history.get('messages'):
+            messages = conversation_history['messages']
+            # 檢查最後一條消息是否是用戶消息且沒有AI回應
+            if messages and messages[-1]['type'] == 'user_message':
+                # 檢查是否有對應的AI回應
+                last_user_msg = messages[-1]
+                has_ai_response = False
+                
+                # 檢查是否已經有AI回應這條用戶消息
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i]['type'] in ['ai_response', 'system_response']:
+                        # 找到最近的AI回應，檢查時間戳
+                        ai_timestamp = messages[i].get('timestamp', '')
+                        user_timestamp = last_user_msg.get('timestamp', '')
+                        if ai_timestamp >= user_timestamp:
+                            has_ai_response = True
+                        break
+                
+                if not has_ai_response:
+                    needs_ai_response = True
+        
+        # 如果需要AI回應，根據狀態決定是否處理
+        if needs_ai_response and api_key:
+            if st.session_state.just_sent_message:
+                # 剛發送消息，先讓用戶看到消息，然後設置觸發AI回應
+                st.session_state.just_sent_message = False
+                st.session_state.processing_ai_response = True
+                # 顯示一個提示並在短時間後自動觸發AI回應
+                st.info("🤖 AI正在準備回應...")
+                import time
+                time.sleep(0.1)  # 短暫延遲讓用戶看到自己的消息
+                st.rerun()
+            elif not st.session_state.processing_ai_response:
+                # 開始處理AI回應
+                st.session_state.processing_ai_response = True
+                st.rerun()
+            else:
+                # 正在處理AI回應
+                st.info("🤖 AI正在思考回應中...")
+                
+                # 自動處理AI回應
+                try:
+                    last_user_input = messages[-1]['content']
+                    
+                    # 使用聊天功能（但不添加用戶消息，因為已經添加了）
+                    with st.spinner("正在生成回應..."):
+                        chat_result = rag_system.process_user_query_for_existing_message(
+                            st.session_state.conversation_session_id, 
+                            last_user_input
+                        )
+                        
+                        if chat_result['success']:
+                            # 重置狀態並重新載入頁面顯示AI回應
+                            st.session_state.processing_ai_response = False
+                            st.rerun()
+                        else:
+                            st.error("AI回應時出現錯誤，請重試。")
+                            st.session_state.processing_ai_response = False
+                            
+                except Exception as e:
+                    st.error(f"AI回應時發生錯誤: {e}")
+                    st.session_state.processing_ai_response = False
+        
         # 快速範例
         st.write("**💡 快速開始：**")
         col1, col2, col3, col4 = st.columns(4)
@@ -423,22 +496,27 @@ def main():
                     # 清空輸入
                     st.session_state.chat_input = ""
                     
-                    with st.spinner("AI正在思考..."):
-                        try:
-                            # 使用聊天功能
-                            chat_result = rag_system.chat_with_user(
-                                st.session_state.conversation_session_id, 
-                                user_input
-                            )
-                            
-                            if chat_result['success']:
-                                # 重新載入頁面顯示新消息
-                                st.rerun()
-                            else:
-                                st.error("發送消息時出現錯誤，請重試。")
-                                
-                        except Exception as e:
-                            st.error(f"發送消息時發生錯誤: {e}")
+                    # 先添加用戶消息到會話中
+                    from datetime import datetime
+                    user_message = {
+                        'type': 'user_message',
+                        'content': user_input,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    
+                    # 立即將用戶消息添加到對話歷史
+                    rag_system.conversation_manager.add_message(
+                        st.session_state.conversation_session_id, 
+                        "user_message", 
+                        user_input
+                    )
+                    
+                    # 設置剛發送消息的標記
+                    st.session_state.just_sent_message = True
+                    st.session_state.processing_ai_response = False
+                    
+                    # 重新載入頁面顯示用戶消息
+                    st.rerun()
         
         # 清空聊天記錄
         st.divider()
