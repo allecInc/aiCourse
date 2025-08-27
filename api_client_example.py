@@ -119,7 +119,7 @@ def main():
     
     # 初始化客戶端
     # 注意：請將您的OpenAI API密鑰替換到這裡
-    API_KEY = "your-openai-api-key-here"  # 替換為您的實際API密鑰
+    API_KEY = "your-key-here"  # 替換為您的實際API密鑰
     
     client = CourseRecommendationAPIClient(
         base_url="http://localhost:8000",

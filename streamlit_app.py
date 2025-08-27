@@ -119,9 +119,9 @@ def display_course_card(course: Dict[str, Any], show_similarity: bool = True):
                 additional_info.append(f"**{field_name}**: {metadata[key]}")
         
         if additional_info:
-            with st.expander("詳細資訊"):
-                for info in additional_info:
-                    st.markdown(info)
+            st.markdown("**詳細資訊:**")
+            for info in additional_info:
+                st.markdown(f"- {info}")
         
         st.markdown('</div>', unsafe_allow_html=True)
 

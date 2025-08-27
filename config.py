@@ -22,5 +22,13 @@ class Config:
     RETRIEVAL_K = 5  # 檢索相似課程數量
     SIMILARITY_THRESHOLD = 0.1  # 相似度閾值 (設定很低以確保找到所有相關課程)
     
-    # 課程文件路徑
-    COURSE_DATA_PATH = "AI課程.json" 
+    # 課程文件路徑 (已由資料庫取代)
+    COURSE_DATA_PATH = "AI課程.json"
+
+    # SQL Server 資料庫設定 (請填入您的實際資訊)
+    DB_DRIVER = os.getenv('DB_DRIVER', '{ODBC Driver 17 for SQL Server}')
+    DB_SERVER = os.getenv('DB_SERVER', 'your_server.database.windows.net')
+    DB_DATABASE = os.getenv('DB_DATABASE', 'your_database_name')
+    DB_USER = os.getenv('DB_USER', 'your_username')
+    DB_PASSWORD = os.getenv('DB_PASSWORD', 'your_password')
+    DB_TABLE = os.getenv('DB_TABLE', 'courses') 

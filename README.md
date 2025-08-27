@@ -35,38 +35,88 @@
 
 ## 🚀 快速開始
 
-### 1. 安裝依賴
+以下是如何設定並在本機執行此專案的步驟。
+
+### 1. 安裝依賴套件
+
+首先，安裝 `requirements.txt` 中列出的所有 Python 套件。建議使用 `python3 -m pip` 以確保您使用的是正確的 Python 環境。
 
 ```bash
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
-### 2. 設定環境變數
-
-創建 `.env` 文件或直接在系統中設定：
-
+**注意**: 如果在執行下一步時遇到關於 `huggingface-hub` 的 `ImportError`，請嘗試更新 `sentence-transformers` 套件：
 ```bash
+python3 -m pip install --upgrade sentence-transformers
+```
+
+### 2. 設定 OpenAI API 金鑰
+
+您需要一個 OpenAI API 金鑰才能使用此系統的推薦功能。
+
+1.  在專案的根目錄（與 `README.md` 相同的目錄）下，建立一個名為 `.env` 的檔案。
+2.  在 `.env` 檔案中加入以下內容，並將 `your_openai_api_key_here` 替換成您自己的金鑰：
+
+```
 OPENAI_API_KEY=your_openai_api_key_here
 ```
 
-### 3. 初始化數據庫
+### 3. 初始化向量資料庫
+
+執行以下指令來處理課程資料、生成向量嵌入，並建立本地向量資料庫。
 
 ```bash
-python setup_database.py
+python3 setup_database.py
 ```
 
-### 4. 啟動應用
+### 4. 啟動應用程式
+
+執行以下腳本來同時啟動後端 API 伺服器和前端 Streamlit 應用程式：
 
 ```bash
-streamlit run streamlit_app.py
+python3 start_all_services.py
 ```
 
 ### 5. 開始使用
 
-1. 在瀏覽器中打開 `http://localhost:8501`
-2. 在側邊欄輸入OpenAI API金鑰
-3. 在「智能推薦」頁面輸入您的需求
-4. 獲得個性化的課程推薦！
+服務啟動後，您會在終端機看到以下資訊：
+
+- **API 服務**: `http://localhost:8000`
+- **網頁介面**: `http://localhost:8501`
+
+在您的瀏覽器中開啟 **[http://localhost:8501](http://localhost:8501)** 即可開始與 AI 課程推薦系統互動！
+
+## 🐳 使用 Docker 部署 (推薦)
+
+對於追求環境一致性和快速部署的使用者，強烈推薦使用 Docker。這可以免去手動安裝 Python、ODBC 驅動程式和依賴套件的繁瑣步驟。
+
+### 事前準備
+
+- **Docker Desktop**: 請先在您的電腦上安裝 [Docker Desktop](https://www.docker.com/products/docker-desktop/)。
+
+### 執行步驟
+
+1.  **設定環境變數**:
+    與手動安裝一樣，請先建立 `.env` 檔案，並填入您的 OpenAI API 金鑰與 SQL Server 資料庫連線資訊。
+
+2.  **初始化向量資料庫**:
+    在專案根目錄開啟命令提示字元 (cmd) 或 PowerShell，執行以下指令。這個指令會啟動一個暫時的容器，在裡面執行資料庫初始化腳本，完成後即會自動移除容器。
+    ```bash
+    docker-compose run --rm api python setup_database.py
+    ```
+
+3.  **啟動所有服務**:
+    接著，執行以下指令來建置映像檔並啟動所有服務：
+    ```bash
+    docker-compose up --build
+    ```
+    首次執行會需要幾分鐘來下載並設定環境。未來若無修改 `Dockerfile`，可直接使用 `docker-compose up` 啟動。
+
+4.  **開始使用**:
+    服務啟動後，在您的瀏覽器中開啟 **[http://localhost:8501](http://localhost:8501)** 即可開始互動。
+
+5.  **停止服務**:
+    回到執行指令的終端機，按下 `Ctrl + C`，然後可執行 `docker-compose down` 來清除容器。
 
 ## 📚 使用範例
 

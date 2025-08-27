@@ -1,4 +1,5 @@
 import openai
+import pyodbc
 from typing import List, Dict, Any, Optional
 import logging
 import os
@@ -33,7 +34,7 @@ class RAGSystem:
             self.openai_client = openai.OpenAI(api_key=self.config.OPENAI_API_KEY)
             
             # 初始化課程處理器
-            self.course_processor = CourseProcessor(self.config.COURSE_DATA_PATH)
+            self.course_processor = CourseProcessor()
             
             # 初始化向量數據庫
             self.vector_store = VectorStore(self.config)
@@ -43,7 +44,238 @@ class RAGSystem:
         except Exception as e:
             logger.error(f"RAG系統初始化失敗: {e}")
             raise
-    
+
+    def generate_sql_where_clause(self, user_query: str) -> str:
+        """
+        使用 AI 將自然語言查詢轉換為 SQL WHERE 條件子句（採用思維鏈 CoT 技術）。
+        """
+        logger.info(f"開始為查詢生成 SQL WHERE 子句 (CoT): {user_query}")
+
+        schema_description = """
+        - 課程代碼 (NVARCHAR): 課程的唯一識別碼，格式類似 '114A47'.
+        - 大類 (NVARCHAR): 課程的主要分類，例如 '有氧系列', '瑜珈系列', '舞蹈系列'.
+        - 課程名稱 (NVARCHAR): 課程的具體名稱.
+        - 授課教師 (NVARCHAR): 教師的姓名.
+        - 上課週次 (NVARCHAR): 描述上課的星期，例如 '[1][3][5]' 代表週一、三、五.
+        - 上課時間 (TIME): 課程開始時間，格式為 'HH:MM'.
+        - 課程費用 (INT): 課程的價格.
+        """
+
+        system_prompt = f"""
+        你是一個頂級的 SQL 專家，專長是將自然語言轉換為 SQL 查詢條件。請遵循「思維鏈」的步驟來分析用戶請求，並以 JSON 格式輸出結果。
+
+        【資料庫欄位綱要】
+        {schema_description}
+
+        【執行步驟】
+        1.  **思考 (thought)**: 逐步分析用戶的請求，拆解出所有的查詢意圖、實體和限制條件。
+        2.  **條件映射 (mapping)**: 將每個意圖分別映射到對應的資料庫欄位和具體的 SQL 條件表達式。
+        3.  **SQL生成 (sql)**: 根據映射結果，組合出最終的 SQL `WHERE` 條件子句。如果沒有可用的條件，則此欄位應為空字串 ""。
+
+        【輸出格式】
+        嚴格使用以下 JSON 格式輸出，不要有任何額外的文字或解釋：
+        ```json
+        {{
+          "thought": "用戶的思考過程分析...",
+          "sql": "最終生成的 WHERE 條件子句..."
+        }}
+        ```
+
+        【重要規則】
+        - `WHERE` 子句中不要包含 `WHERE` 這個詞。
+        - 對於文字欄位，優先使用 `LIKE '%keyword%'` 進行模糊匹配，除非用戶意圖非常明確。
+        - `上課週次` 欄位，週一對應'%[1]%'，週二對應'%[2]%'，以此類推。
+        - 如果用戶的請求與課程查詢完全無關（例如打招呼），則 `sql` 欄位必須為空字串 ""。
+
+        【範例】
+        用戶請求: "我想找 BoBo 老師開的，費用低於 1000 元的瑜珈課"
+        ```json
+        {{
+          "thought": "用戶指定了三個條件：1. 老師是 BoBo。 2. 費用需要低於 1000。 3. 課程大類是瑜珈。",
+          "sql": "授課教師 = 'BoBo(男)' AND 課程費用 < 1000 AND 大類 = 'C　瑜珈系列'"
+        }}
+        ```
+        用戶請求: "你好啊"
+        ```json
+        {{
+          "thought": "用戶在打招呼，與課程查詢無關。",
+          "sql": ""
+        }}
+        ```
+        """
+
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=self.config.MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"用戶請求: \"{user_query}\""}
+                ],
+                temperature=0.0,
+                max_tokens=500,
+                response_format={"type": "json_object"}
+            )
+            
+            response_text = response.choices[0].message.content.strip()
+            logger.info(f"AI (CoT) response: {response_text}")
+            
+            import json
+            try:
+                data = json.loads(response_text)
+                where_clause = data.get("sql", "")
+                
+                # 基本的安全檢查
+                forbidden_keywords = ['DROP', 'DELETE', 'UPDATE', 'INSERT', ';']
+                if any(keyword in where_clause.upper() for keyword in forbidden_keywords):
+                    logger.warning(f"檢測到潛在的惡意 SQL 關鍵字，拒絕生成: {where_clause}")
+                    return ""
+                
+                return where_clause
+            except json.JSONDecodeError:
+                logger.error(f"無法解析 AI 回傳的 JSON: {response_text}")
+                return ""
+
+        except Exception as e:
+            logger.error(f"呼叫 OpenAI 生成 SQL WHERE 子句失敗: {e}")
+            return ""
+
+    def fetch_courses_by_sql(self, sql_query: str) -> List[Dict[str, Any]]:
+        """
+        使用提供的完整 SQL 查詢來獲取課程資料。
+        """
+        logger.info(f"執行 SQL 查詢: {sql_query[:200]}...")
+        conn_str = (
+            f"DRIVER={self.config.DB_DRIVER};"
+            f"SERVER={self.config.DB_SERVER};"
+            f"DATABASE={self.config.DB_DATABASE};"
+            f"UID={self.config.DB_USER};"
+            f"PWD={self.config.DB_PASSWORD};"
+        )
+        courses = []
+        try:
+            with pyodbc.connect(conn_str, timeout=5) as cnxn:
+                cursor = cnxn.cursor()
+                cursor.execute(sql_query)
+                columns = [column[0] for column in cursor.description]
+                rows = cursor.fetchall()
+                courses = [dict(zip(columns, row)) for row in rows]
+            logger.info(f"查詢成功，獲取了 {len(courses)} 筆課程。")
+        except Exception as e:
+            logger.error(f"執行 SQL 查詢失敗: {e}")
+        return courses
+
+    def query_database_with_ai(self, user_query: str) -> List[Dict[str, Any]]:
+        """
+        主要流程：將自然語言轉換為 SQL 查詢並從資料庫獲取結果。
+        """
+        logger.critical("--- EXECUTING LIVE AI-SQL DATABASE QUERY ---")
+        where_clause = self.generate_sql_where_clause(user_query)
+
+        if not where_clause:
+            logger.info("AI 未能生成有效的 WHERE 子句，返回空結果。")
+            return []
+
+        # --- 翻譯層：將 AI 使用的別名翻譯回真實的 SQL 欄位 ---
+        translation_map = {
+            '大類': 'C.k02',
+            '課程名稱': 'B.k03',
+            '課程介紹': 'B.k18',
+            '教室名稱': 'D.k02',
+            '課程代碼': 'A.k34',
+            '授課教師': 'E.k02',
+            '上課週次': 'A.k07',
+            '課程費用': 'A.k13',
+            '體驗費用': 'A.k14',
+            '開班人數': 'A.k16',
+            '滿班人數': 'A.k17',
+            # 處理 CASE 和 CONVERT 的特殊情況
+            '年齡限制': "(CASE WHEN A.k80 = 0 THEN '無' ELSE '有' END)",
+            '上課時間': "(CONVERT(VARCHAR(5), A.k08, 108))"
+        }
+        
+        translated_where_clause = where_clause
+        for alias, real_column in translation_map.items():
+            translated_where_clause = translated_where_clause.replace(alias, real_column)
+        
+        logger.info(f"翻譯後的 WHERE 子句: {translated_where_clause}")
+        # --------------------------------------------------------
+
+        base_query = """
+        SELECT C.k02 as 大類, B.k03 as 課程名稱, B.k18 as 課程介紹, D.k02 as 教室名稱, 
+               A.k34 as 課程代碼, isnull(E.k02,'無') as 授課教師, 
+               CASE WHEN A.k80 = 0 THEN '無' ELSE '有' END as 年齡限制,
+               isnull(A.k07,'無') as 上課週次, CONVERT(VARCHAR(5), A.k08, 108) AS 上課時間,
+               A.k13 as 課程費用, A.k14 as 體驗費用, A.k16 as 開班人數, A.k17 as 滿班人數
+        FROM wk05 A
+        INNER JOIN wk01 B ON A.k04 = B.k00
+        INNER JOIN wk00 C ON B.k01 = C.k00
+        INNER JOIN wk02 D ON A.k02 = D.k00
+        INNER JOIN wk03eee E ON A.k05 = E.k00
+        WHERE A.k06 = 1
+        """
+
+        final_sql = f"{base_query} AND ({translated_where_clause})"
+        
+        # 執行查詢
+        courses_from_db = self.fetch_courses_by_sql(final_sql)
+
+        # 將資料庫查詢結果轉換為 UI 期望的格式
+        transformed_courses = []
+        for course in courses_from_db:
+            transformed_courses.append({
+                'title': course.get('課程名稱'),
+                'category': course.get('大類'),
+                'description': course.get('課程介紹'),
+                'similarity_score': 1.0,  # 因為是精確篩選，所以給定一個假分數
+                'metadata': {
+                    'meta_授課教師': course.get('授課教師'),
+                    'meta_年齡限制': course.get('年齡限制'),
+                    'meta_上課時間': course.get('上課時間'),
+                    'meta_課程費用': course.get('課程費用'),
+                    'meta_體驗費用': course.get('體驗費用')
+                }
+            })
+        
+        return transformed_courses
+
+    def generate_clarifying_question(self, user_query: str) -> str:
+        """
+        當找不到課程時，生成一個澄清問題。
+        """
+        logger.info(f"為查詢生成澄清問題: {user_query}")
+        system_prompt = """
+        你是一個友善且專業的AI課程顧問。系統剛剛根據用戶的查詢找不到任何完全匹配的課程。
+        你的任務是：
+        1.  首先，明確地告知用戶，沒有找到完全符合他們「所有」條件的課程。請務必提到用戶的具體條件（例如「下午」、「王老師」等）。
+        2.  接著，立刻無縫地轉為提出有幫助的、引導性的問題，來放寬或修改搜尋條件。
+
+        重要原則:
+        1.  語氣要自然、友善。
+        2.  第一句話必須是直接的回應，承認找不到「完全符合」的結果。
+        3.  第二句話必須是開放性的提問，提供替代方案或詢問其他偏好。
+        4.  用繁體中文回答。
+
+        範例:
+        - 用戶查詢: "我想上一些下午的瑜伽課程"
+        - 你的回應: "抱歉，目前沒有找到完全符合在「下午」開課的瑜珈課程。不過我們有很多在早上或晚上開課的瑜珈選項，請問您對這些時段方便嗎？或者您對特定老師有沒有偏好呢？"
+        - 用戶查詢: "我想找王大明老師的課"
+        - 你的回應: "我們目前沒有找到「王大明」老師開設的課程。請問老師的名字是否正確？或者，您對其他老師的同類型課程會感興趣嗎？"
+        """
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=self.config.MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"用戶查詢: \"{user_query}\""}
+                ],
+                temperature=0.8,
+                max_tokens=300
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error(f"生成澄清問題失敗: {e}")
+            return "抱歉，我不太確定該如何幫您縮小範圍，您可以試著提供更具體的課程名稱或類別嗎？"
+
     def initialize_knowledge_base(self, force_rebuild: bool = False, check_updates: bool = True):
         """初始化知識庫"""
         try:
@@ -133,24 +365,51 @@ class RAGSystem:
             if not retrieved_courses:
                 return "抱歉，我找不到符合您需求的課程。請嘗試用不同的關鍵字搜尋。"
             
+            # --- RAG Grounding v2：將結構化資料轉換為文字描述，再提供給AI ---
+            grounding_texts = []
+            for course in retrieved_courses:
+                # 使用 course_processor 的方法來創建豐富的文本描述
+                # 注意：course_processor.create_searchable_text 需要的格式與我們從DB拿到的可能不同，需要適配
+                # 這裡我們手動模擬一個類似的結構
+                course_for_text = {
+                    '課程名稱': course.get('title'),
+                    '大類': course.get('category'),
+                    '課程介紹': course.get('description'),
+                    **course.get('metadata', {})
+                }
+                grounding_texts.append(self.course_processor.create_searchable_text(course_for_text))
+
+            # --- 從檢索到的資料中動態建立許可清單 ---
+            allowed_categories = list(set([c['category'] for c in retrieved_courses]))
+            allowed_teachers = list(set([c['metadata'].get('meta_授課教師') for c in retrieved_courses if c['metadata'].get('meta_授課教師')]))
+
+            grounding_prompt_part = f"""
+            【最重要規則】你的所有回覆，包括你提出的問題，都必須嚴格基於我下方提供的「相關課程資訊」。
+            絕對禁止提及、詢問或建議任何未在下方明確出現的課程名稱、課程類型、老師姓名或任何課程細節。
+            例如，你只能在以下列表中選擇課程類別來提問：{allowed_categories}
+            例如，你只能在以下列表中選擇老師來提問：{allowed_teachers}
+            你的世界裡只有我給你的這些資料，不要使用任何外部知識。
+            """
+
             # 獲取對話上下文
             context = {}
             if session_id:
                 context = self.conversation_manager.get_conversation_context(session_id)
             
             # 構建系統提示
-            system_prompt = """你是一個專業的課程推薦助手。基於提供的課程資訊和對話歷史，為用戶推薦最適合的課程。
+            system_prompt = f"""你是一個專業的課程推薦助手。基於提供的課程資訊和對話歷史，為用戶推薦最適合的課程。
 
-重要原則：
-1. 只推薦提供的課程資訊中存在的課程，絕對不能虛構或推薦不存在的課程
-2. 根據用戶需求、對話歷史和課程匹配度進行排序推薦
-3. 考慮用戶的偏好和之前拒絕的課程
-4. 提供具體且實用的推薦理由
-5. 用繁體中文回答
-6. 格式要清晰，包含課程名稱、類別、介紹和推薦理由
-7. 如果用戶有反饋或偏好，要特別注意避免推薦類似的不合適課程
+            {grounding_prompt_part}
 
-如果沒有找到完全匹配的課程，要誠實說明，並推薦最相近的替代選項。"""
+            其他原則：
+            1. 只推薦提供的課程資訊中存在的課程，絕對不能虛構或推薦不存在的課程
+            2. 根據用戶需求、對話歷史和課程匹配度進行排序推薦
+            3. 考慮用戶的偏好和之前拒絕的課程
+            4. 提供具體且實用的推薦理由
+            5. 用繁體中文回答
+            6. 格式要清晰，包含課程名稱、類別、介紹和推薦理由
+
+            如果沒有找到完全匹配的課程，要誠實說明，並推薦最相近的替代選項。"""
 
             # 構建用戶查詢上下文
             context_parts = []
@@ -163,7 +422,7 @@ class RAGSystem:
                     for pref, value in context["user_preferences"].items():
                         if value:
                             pref_name = pref.replace("_sensitive", "").replace("_", " ")
-                            context_parts.append(f"  - 特別關注: {pref_name}")
+                            context_parts.append(f"  -特別關注: {pref_name}")
                 
                 if context.get("rejected_courses"):
                     context_parts.append(f"用戶之前拒絕的課程: {len(context['rejected_courses'])} 個")
@@ -176,27 +435,9 @@ class RAGSystem:
                             context_parts.append(f"  - 用戶反饋: {msg['content']}")
             
             context_parts.append("\n相關課程資訊:")
-            
-            for i, course in enumerate(retrieved_courses, 1):
-                # 檢查課程是否在拒絕列表中
-                rejected = context.get("rejected_courses", [])
-                status = " (用戶之前拒絕)" if course['title'] in rejected else ""
-                
-                context_parts.append(f"\n{i}. 課程名稱: {course['title']}{status}")
-                context_parts.append(f"   類別: {course['category']}")
-                context_parts.append(f"   介紹: {course['description']}")
-                context_parts.append(f"   相似度: {course['similarity_score']:.3f}")
-                
-                # 添加額外的元數據資訊
-                metadata = course.get('metadata', {})
-                additional_info = []
-                for key in ['meta_授課教師', 'meta_年齡限制', 'meta_上課時間', 'meta_課程費用', 'meta_體驗費用']:
-                    if key in metadata and metadata[key]:
-                        field_name = key.replace('meta_', '')
-                        additional_info.append(f"{field_name}: {metadata[key]}")
-                
-                if additional_info:
-                    context_parts.append(f"   詳細資訊: {', '.join(additional_info)}")
+            # 使用轉換後的文字描述作為上下文
+            for i, text in enumerate(grounding_texts, 1):
+                context_parts.append(f"\n--- 課程 {i} ---\n{text}")
             
             user_prompt = "\n".join(context_parts)
             user_prompt += "\n\n請根據以上課程資訊和對話歷史，為用戶提供最適合的課程推薦："
@@ -423,22 +664,36 @@ class RAGSystem:
     def chat_with_user(self, session_id: str, user_message: str) -> Dict[str, Any]:
         """聊天功能 - 處理用戶的聊天消息"""
         try:
-            # 判斷用戶是否在詢問課程相關問題
-            is_course_query = self._is_course_related_query(user_message)
+            # 記錄用戶原始消息
+            self.conversation_manager.add_message(session_id, "user_message", user_message)
+
+            # 結合對話歷史，生成一個更豐富的查詢
+            refined_query = self.conversation_manager.get_refined_query(session_id, user_message)
+            logger.info(f"原始查詢: '{user_message}', 上下文優化後查詢: '{refined_query}'")
+
+            # 使用優化後的查詢來判斷是否與課程相關
+            is_course_query = self._is_course_related_query(refined_query)
             
             if is_course_query:
-                # 如果是課程相關查詢，使用專門的聊天推薦方法 (已包含消息記錄)
-                result = self._get_course_recommendation_for_chat(user_message, session_id)
-                ai_response = result['recommendation']
-                courses = result.get('retrieved_courses', [])
+                # 如果是課程相關查詢，使用新的 AI-SQL 功能
+                logger.info(f"使用 AI-SQL 查詢處理課程問題: {refined_query}")
+                courses = self.query_database_with_ai(refined_query)
+                
+                if courses:
+                    # 將課程列表格式化成文字回應
+                    course_list = "\n".join([f"- {c['title']} ({c['category']})" for c in courses])
+                    ai_response = f"我根據您的需求，找到了 {len(courses)} 門相關課程：\n{course_list}"
+                else:
+                    # 找不到課程，生成澄清問題
+                    ai_response = self.generate_clarifying_question(refined_query)
+                
+                # 記錄AI回應
+                self.conversation_manager.add_message(
+                    session_id, "ai_response", ai_response, courses=courses
+                )
             else:
-                # 如果是一般聊天，先記錄用戶消息，然後生成回應
-                self.conversation_manager.add_message(session_id, "user_message", user_message)
-                
-                # 獲取對話上下文
+                # 如果是一般聊天，使用原有的聊天回應生成邏輯
                 context = self.conversation_manager.get_conversation_context(session_id)
-                
-                # 生成聊天回應
                 ai_response = self._generate_chat_response(user_message, context)
                 courses = []
                 
@@ -540,12 +795,14 @@ class RAGSystem:
             # 構建完整提示
             conversation_context = "\n".join(chat_history) if chat_history else "這是對話的開始。"
             
-            user_prompt = f"""對話歷史:
-{conversation_context}
+            user_prompt = f"""
+            對話歷史:
+            {conversation_context}
 
-用戶剛剛說: {user_message}
+            用戶剛剛說: {user_message}
 
-請根據對話歷史給出適當的回應。如果用戶在詢問課程相關問題，可以引導他們使用更具體的描述來獲得課程推薦。"""
+            請根據對話歷史給出適當的回應。如果用戶在詢問課程相關問題，可以引導他們使用更具體的描述來獲得課程推薦。
+            """
 
             # 呼叫GPT
             response = self.openai_client.chat.completions.create(
@@ -620,32 +877,26 @@ class RAGSystem:
         self.conversation_manager.clear_session(session_id)
     
     def process_user_query_for_existing_message(self, session_id: str, user_message: str) -> Dict[str, Any]:
-        """處理已存在的用戶消息 - 只生成AI回應，不再次添加用戶消息"""
+        """處理已存在的用戶消息 - 使用 AI-SQL 查詢"""
         try:
-            # 判斷用戶是否在詢問課程相關問題
             is_course_query = self._is_course_related_query(user_message)
             
             if is_course_query:
-                # 如果是課程相關查詢，獲取對話上下文並優化查詢
-                refined_query = self.conversation_manager.get_refined_query(session_id, user_message)
+                logger.info(f"使用 AI-SQL 查詢處理課程問題: {user_message}")
+                courses = self.query_database_with_ai(user_message)
                 
-                # 檢索相關課程
-                retrieved_courses = self.retrieve_relevant_courses(refined_query)
-                
-                if not retrieved_courses:
-                    ai_response = "抱歉，我找不到符合您需求的課程。請嘗試用不同的關鍵字搜尋，例如：'有氧運動'、'瑜珈'、'游泳'、'球類運動'等。"
+                if courses:
+                    # 將課程列表格式化成文字回應
+                    course_list = "\n".join([f"- {c['title']} ({c['category']})" for c in courses])
+                    ai_response = f"我根據您的需求，找到了 {len(courses)} 門相關課程：\n{course_list}"
                 else:
-                    # 生成推薦
-                    ai_response = self.generate_course_recommendation(user_message, retrieved_courses, session_id)
-                
-                courses = retrieved_courses
+                    # 找不到課程，生成澄清問題
+                    ai_response = self.generate_clarifying_question(user_message)
             else:
-                # 如果是一般聊天，獲取對話上下文並生成回應
                 context = self.conversation_manager.get_conversation_context(session_id)
                 ai_response = self._generate_chat_response(user_message, context)
                 courses = []
             
-            # 記錄AI回應
             self.conversation_manager.add_message(
                 session_id, "ai_response", ai_response, courses=courses
             )
@@ -660,13 +911,10 @@ class RAGSystem:
         except Exception as e:
             logger.error(f"處理用戶查詢失敗: {e}")
             error_response = "抱歉，我遇到了一些問題。請稍後再試。"
-            
-            # 記錄錯誤回應
             self.conversation_manager.add_message(session_id, "ai_response", error_response)
-            
             return {
                 'success': False,
                 'ai_response': error_response,
                 'courses': [],
                 'is_course_query': False
-            } 
+            }
