@@ -84,7 +84,8 @@ class RAGSystem:
         【重要規則】
         - `WHERE` 子句中不要包含 `WHERE` 這個詞。
         - 對於文字欄位，優先使用 `LIKE '%keyword%'` 進行模糊匹配，除非用戶意圖非常明確。
-        - `上課週次` 欄位，週一對應'%[1]%'，週二對應'%[2]%'，以此類推。
+        - `上課週次` 欄位的資料格式：'[0]' 表示週日、'[1]' 表示週一、...、'[6]' 表示週六。
+          因此：週一→'%[1]%'、週二→'%[2]%'、...、週六→'%[6]%'、週日→'%[0]%'
         - 如果用戶的請求與課程查詢完全無關（例如打招呼），則 `sql` 欄位必須為空字串 ""。
 
         【範例】
@@ -360,17 +361,23 @@ class RAGSystem:
     
     def generate_course_recommendation(self, query: str, retrieved_courses: List[Dict[str, Any]], 
                                       session_id: str = None) -> str:
-        """使用GPT-4.1 mini生成課程推薦，支援對話上下文"""
+        """使用 GPT 生成課程推薦（嚴格避免幻覺；只允許輸出 Top‑K 中的課名）"""
         try:
+            import json
             if not retrieved_courses:
                 return "抱歉，我找不到符合您需求的課程。請嘗試用不同的關鍵字搜尋。"
-            
-            # --- RAG Grounding v2：將結構化資料轉換為文字描述，再提供給AI ---
+
+            # 允許的課名與老師名清單（用於約束 LLM 輸出）
+            allowed_titles = [c.get('title') for c in retrieved_courses if c.get('title')]
+            allowed_categories = list({c.get('category') for c in retrieved_courses if c.get('category')})
+            allowed_teachers = list({
+                c.get('metadata', {}).get('meta_授課教師')
+                for c in retrieved_courses if c.get('metadata', {}).get('meta_授課教師')
+            })
+
+            # Grounding：將課程轉為精簡、可讀的描述
             grounding_texts = []
             for course in retrieved_courses:
-                # 使用 course_processor 的方法來創建豐富的文本描述
-                # 注意：course_processor.create_searchable_text 需要的格式與我們從DB拿到的可能不同，需要適配
-                # 這裡我們手動模擬一個類似的結構
                 course_for_text = {
                     '課程名稱': course.get('title'),
                     '大類': course.get('category'),
@@ -379,162 +386,204 @@ class RAGSystem:
                 }
                 grounding_texts.append(self.course_processor.create_searchable_text(course_for_text))
 
-            # --- 從檢索到的資料中動態建立許可清單 ---
-            allowed_categories = list(set([c['category'] for c in retrieved_courses]))
-            allowed_teachers = list(set([c['metadata'].get('meta_授課教師') for c in retrieved_courses if c['metadata'].get('meta_授課教師')]))
+            # 對話上下文
+            context = self.conversation_manager.get_conversation_context(session_id) if session_id else {}
 
-            grounding_prompt_part = f"""
-            【最重要規則】你的所有回覆，包括你提出的問題，都必須嚴格基於我下方提供的「相關課程資訊」。
-            絕對禁止提及、詢問或建議任何未在下方明確出現的課程名稱、課程類型、老師姓名或任何課程細節。
-            例如，你只能在以下列表中選擇課程類別來提問：{allowed_categories}
-            例如，你只能在以下列表中選擇老師來提問：{allowed_teachers}
-            你的世界裡只有我給你的這些資料，不要使用任何外部知識。
-            """
+            # 嚴格系統提示：要求回傳 JSON，課名只能從 allowed_titles 挑選，且逐字一致
+            system_prompt = f"""
+你是嚴謹的課程推薦助手。嚴格遵守：
+1) 只能推薦我提供的課程清單中的標題（逐字一致），不得創造新課名或新課程類型；
+2) 只能引用以下欄位：課程名稱（必須來自清單）、類別、授課教師、上課時間、費用、介紹；
+3) 若找不到合適課程，請提出一個澄清問題，不可輸出任何課名；
+4) 用繁體中文，口語但專業，簡明扼要；
+5) 僅輸出 JSON（不要任何額外文字）。
 
-            # 獲取對話上下文
-            context = {}
-            if session_id:
-                context = self.conversation_manager.get_conversation_context(session_id)
-            
-            # 構建系統提示
-            system_prompt = f"""你是一個專業的課程推薦助手。基於提供的課程資訊和對話歷史，為用戶推薦最適合的課程。
+澄清問題的限制：
+- 只能詢問以下面向：時段（早上/下午/晚上/平日/週末）、指定老師、價格範圍、偏好類別；
+- 禁止提及「線上/實體」除非提供的課程資訊中明確出現「線上」字樣；
+- 禁止舉例任何未在允許清單中的課名或風格名稱（例如哈達、流瑜珈、陰瑜珈等）除非該名稱就出現在允許清單中；
 
-            {grounding_prompt_part}
+【允許的課程名稱（只能從此清單中挑選，且需逐字一致）】
+{allowed_titles}
 
-            其他原則：
-            1. 只推薦提供的課程資訊中存在的課程，絕對不能虛構或推薦不存在的課程
-            2. 根據用戶需求、對話歷史和課程匹配度進行排序推薦
-            3. 考慮用戶的偏好和之前拒絕的課程
-            4. 提供具體且實用的推薦理由
-            5. 用繁體中文回答
-            6. 格式要清晰，包含課程名稱、類別、介紹和推薦理由
+【允許的類別（可引用）】
+{allowed_categories}
 
-            如果沒有找到完全匹配的課程，要誠實說明，並推薦最相近的替代選項。"""
+【允許的老師（可引用；可能為空）】
+{allowed_teachers}
 
-            # 構建用戶查詢上下文
-            context_parts = []
-            context_parts.append(f"用戶查詢: {query}\n")
-            
-            # 添加對話歷史和用戶偏好
-            if context:
-                if context.get("user_preferences"):
-                    context_parts.append("用戶偏好:")
-                    for pref, value in context["user_preferences"].items():
-                        if value:
-                            pref_name = pref.replace("_sensitive", "").replace("_", " ")
-                            context_parts.append(f"  -特別關注: {pref_name}")
-                
-                if context.get("rejected_courses"):
-                    context_parts.append(f"用戶之前拒絕的課程: {len(context['rejected_courses'])} 個")
-                
-                if context.get("messages"):
-                    recent_messages = context["messages"][-3:]  # 最近3條消息
-                    context_parts.append("最近的對話:")
-                    for msg in recent_messages:
-                        if msg["type"] == "user_feedback":
-                            context_parts.append(f"  - 用戶反饋: {msg['content']}")
-            
-            context_parts.append("\n相關課程資訊:")
-            # 使用轉換後的文字描述作為上下文
+請輸出以下 JSON 格式：
+{{
+  "intro": "對用戶需求的簡短回應",
+  "recommendations": [
+    {{"title": "必須是允許清單中的課名", "reason": "為何匹配"}},
+    ... 最多 3 筆
+  ],
+  "clarify_question": "若無法完全匹配時的一句澄清問題（否則可為空字串）"
+}}
+"""
+
+            # 構建使用者訊息（包含查詢、對話重點與課程資料）
+            parts = [f"用戶查詢: {query}", "相關課程資訊："]
             for i, text in enumerate(grounding_texts, 1):
-                context_parts.append(f"\n--- 課程 {i} ---\n{text}")
-            
-            user_prompt = "\n".join(context_parts)
-            user_prompt += "\n\n請根據以上課程資訊和對話歷史，為用戶提供最適合的課程推薦："
-            
-            # 呼叫GPT-4.1 mini
+                parts.append(f"--- 課程 {i} ---\n{text}")
+            user_prompt = "\n".join(parts)
+
+            # 低溫度，要求輸出 JSON
             response = self.openai_client.chat.completions.create(
                 model=self.config.MODEL_NAME,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.7,
-                max_tokens=1500,
-                top_p=0.9
+                temperature=0.0,
+                max_tokens=600,
+                response_format={"type": "json_object"}
             )
-            
-            recommendation = response.choices[0].message.content.strip()
-            logger.info(f"生成推薦完成，長度: {len(recommendation)} 字符")
-            
-            return recommendation
+
+            raw = response.choices[0].message.content.strip()
+            data = json.loads(raw)
+
+            # 後處理：只保留合法課名的推薦
+            recs = data.get('recommendations', []) or []
+            safe_recs = []
+            titles_set = set(allowed_titles)
+            for r in recs:
+                t = (r or {}).get('title', '')
+                if t in titles_set:
+                    safe_recs.append(r)
+
+            # 保底策略：若模型未返回合法推薦，但我們有檢索結果，則使用檢索結果前3筆
+            if not safe_recs and retrieved_courses:
+                for c in retrieved_courses[:3]:
+                    safe_recs.append({
+                        'title': c.get('title'),
+                        'reason': '與您的需求最相關，且確實存在於我們的課程資料中。'
+                    })
+
+            # 組裝最終可讀文字（並淨化所有文字避免越權用語）
+            lines = []
+            intro = data.get('intro') or "以下是根據您需求整理的推薦："
+            banned_terms = [
+                "線上", "線上課", "實體", "線下", "遠距",
+                "哈達", "流瑜伽", "流瑜珈", "陰瑜伽", "陰瑜珈", "阿斯坦加", "艾揚格", "熱瑜珈"
+            ]
+            for bt in banned_terms:
+                if bt in intro:
+                    intro = intro.replace(bt, "")
+            lines.append(f"🤖 {intro}")
+
+            if safe_recs:
+                for idx, r in enumerate(safe_recs[:3], 1):
+                    title = r.get('title')
+                    reason = r.get('reason') or "這堂課與您的需求高度相符。"
+                    for bt in banned_terms:
+                        if bt in reason:
+                            reason = reason.replace(bt, "")
+                    # 取出該課的其他資訊輔助展示（非必須）
+                    matched = next((c for c in retrieved_courses if c.get('title') == title), None)
+                    extra = []
+                    if matched:
+                        cat = matched.get('category')
+                        teacher = matched.get('metadata', {}).get('meta_授課教師')
+                        time_ = matched.get('metadata', {}).get('meta_上課時間')
+                        fee = matched.get('metadata', {}).get('meta_課程費用')
+                        if cat: extra.append(f"類別：{cat}")
+                        if teacher: extra.append(f"老師：{teacher}")
+                        if time_: extra.append(f"時間：{time_}")
+                        if fee: extra.append(f"費用：{fee}")
+                    details = (" • " + "；".join(extra)) if extra else ""
+                    lines.append(f"\n⭐ 推薦 {idx}：{title}{details}\n• 理由：{reason}")
+            else:
+                clarify = data.get('clarify_question') or "您是否接受不同的上課時段（早上/晚上），或有偏好的授課教師與價格範圍？"
+                if any(bt in clarify for bt in banned_terms):
+                    clarify = "您是否接受不同的上課時段（早上/晚上），或有偏好的授課教師與價格範圍？"
+                lines.append("目前沒有找到完全匹配的課程。")
+                lines.append(f"👉 {clarify}")
+
+            text = "\n".join(lines).strip()
+            logger.info(f"生成推薦完成，長度: {len(text)} 字符")
+            return text
             
         except Exception as e:
             logger.error(f"生成課程推薦失敗: {e}")
             return "抱歉，生成推薦時發生錯誤。請稍後再試。"
     
     def get_course_recommendation(self, query: str, k: int = None, session_id: str = None) -> Dict[str, Any]:
-        """獲取課程推薦（完整流程）- MODIFIED: 使用全量課程進行推薦"""
+        """獲取課程推薦（Top‑K 流程）：檢索 Top‑K → 交給 AI 生成口語化推薦"""
         try:
-            logger.info(f"開始處理查詢 (全量模式): {query}")
-            
-            # 如果有會話ID，記錄用戶查詢
+            logger.info(f"開始處理查詢 (Top-K): {query}")
+
+            # 記錄用戶查詢
             if session_id:
                 self.conversation_manager.add_message(session_id, "user_query", query)
 
-            # 1. MODIFIED: 獲取所有課程，而不是檢索相關課程
-            logger.info("正在加載所有課程資料...")
-            # 使用 course_processor 準備好的數據格式
-            all_courses = self.course_processor.prepare_for_vectorization()
-            
-            # 為了與 generate_course_recommendation 的輸入格式保持一致，
-            # 我們手動添加一個假的 similarity_score
-            courses_for_generation = []
-            for course in all_courses:
-                course_copy = course.copy()
-                course_copy['similarity_score'] = 1.0 # 添加假的相似度分數
-                courses_for_generation.append(course_copy)
+            # 1) 檢索 Top‑K 相關課程
+            topk = k or self.config.RETRIEVAL_K
+            retrieved_courses = self.retrieve_relevant_courses(query, topk)
 
-            logger.info(f"已加載 {len(courses_for_generation)} 門課程送交 AI 進行分析。")
+            # 1.1) 依用語中的時段字樣做二次過濾（例如：早上/下午/晚上）
+            def parse_time_ok(t: str, bucket: str) -> bool:
+                try:
+                    if not t:
+                        return False
+                    hh, mm = t.split(":")
+                    mins = int(hh) * 60 + int(mm)
+                    if bucket == 'morning':  # 00:00–11:59
+                        return mins < 12 * 60
+                    if bucket == 'afternoon':  # 12:00–17:59
+                        return 12 * 60 <= mins < 18 * 60
+                    if bucket == 'evening':  # 18:00–23:59
+                        return mins >= 18 * 60
+                    return True
+                except:
+                    return False
 
-            # --- NEW: Log the data of each course being sent to the AI ---
-            logger.info("--- 開始記錄本次推薦使用的所有課程資料 ---")
-            for course in courses_for_generation:
-                metadata = course.get('metadata', {})
-                logger.info(
-                    f"  - 課程: {course.get('title', 'N/A')} | "
-                    f"代碼: {metadata.get('課程代碼', 'N/A')} | "
-                    f"教師: {metadata.get('授課教師', 'N/A')} | "
-                    f"費用: {metadata.get('課程費用', 'N/A')}"
-                )
-            logger.info("--- 課程資料記錄完畢 ---")
-            # ---------------------------------------------------------
+            q = query or ""
+            bucket = None
+            if '下午' in q:
+                bucket = 'afternoon'
+            elif any(w in q for w in ['早上', '上午']):
+                bucket = 'morning'
+            elif '晚上' in q:
+                bucket = 'evening'
 
-            if not courses_for_generation:
-                return {
-                    'query': query,
-                    'retrieved_courses': [],
-                    'recommendation': "抱歉，課程資料庫目前是空的，我無法提供任何推薦。",
-                    'success': False
-                }
-            
-            # 2. 生成推薦 (傳入所有課程)
-            # 警告: 這會非常慢且昂貴
-            logger.warning("正在將所有課程發送給 AI，這可能會很慢且昂貴。")
-            recommendation = self.generate_course_recommendation(query, courses_for_generation, session_id)
-            
-            # 記錄系統回應
+            filtered_courses = []
+            if bucket:
+                for c in retrieved_courses:
+                    t = c.get('metadata', {}).get('meta_上課時間')
+                    if parse_time_ok(t, bucket):
+                        filtered_courses.append(c)
+                # 若有符合時段的課，採用過濾後的集合
+                if filtered_courses:
+                    retrieved_courses = filtered_courses
+
+            # 2) 生成推薦（僅基於檢索到的結果）
+            recommendation = self.generate_course_recommendation(query, retrieved_courses, session_id)
+
+            # 3) 記錄系統回應與課程
             if session_id:
                 self.conversation_manager.add_message(
-                    session_id, "system_response", recommendation, 
-                    courses=courses_for_generation # 記錄所有課程
+                    session_id,
+                    "system_response",
+                    recommendation,
+                    courses=retrieved_courses
                 )
-            
+
             return {
                 'query': query,
-                # 在 retrieved_courses 中返回所有課程，以便調試
-                'retrieved_courses': courses_for_generation,
+                'retrieved_courses': retrieved_courses,
                 'recommendation': recommendation,
                 'success': True,
                 'session_id': session_id
             }
-            
+
         except Exception as e:
-            logger.error(f"獲取課程推薦失敗 (全量模式): {e}")
+            logger.error(f"獲取課程推薦失敗 (Top-K): {e}")
             return {
                 'query': query,
                 'retrieved_courses': [],
-                'recommendation': f"系統發生錯誤 (全量模式): {str(e)}",
+                'recommendation': f"系統發生錯誤: {str(e)}",
                 'success': False
             }
     
@@ -778,26 +827,52 @@ class RAGSystem:
             }
     
     def _is_course_related_query(self, message: str) -> bool:
-        """判斷消息是否與課程相關"""
-        course_keywords = [
-            '課程', '推薦', '學習', '教學', '訓練', '班級', '報名', '上課',
-            '減肥', '瑜珈', '游泳', '健身', '運動', '舞蹈', '音樂', '繪畫',
-            '語言', '電腦', '程式', '設計', '攝影', '烹飪', '手工', '才藝'
-        ]
-        
-        return any(keyword in message for keyword in course_keywords)
+        """判斷消息是否與課程相關（積極模式，較容易觸發檢索）。"""
+        if not message:
+            return False
+        msg = str(message)
+
+        # 1) 類別/課程關鍵字（包含單字「課」與更廣義的類別詞）
+        def _split_env_list(value: str) -> list:
+            return [x.strip() for x in (value or '').split(',') if x.strip()]
+
+        category_keywords = _split_env_list(self.config.COURSE_TRIGGER_KEYWORDS)
+        if any(k in msg for k in category_keywords):
+            return True
+
+        # 2) 觸發動詞（學/學習/想學/想上/想報名/想參加）
+        intent_verbs = _split_env_list(self.config.COURSE_TRIGGER_VERBS)
+        if any(v in msg for v in intent_verbs):
+            return True
+
+        # 3) 時段/星期信號 + 類別/課程意圖的組合
+        time_signals = _split_env_list(self.config.COURSE_TRIGGER_TIME_SIGNALS)
+        week_signals = _split_env_list(self.config.COURSE_TRIGGER_WEEK_SIGNALS)
+        if (any(t in msg for t in time_signals) or any(w in msg for w in week_signals)) and \
+           any(k in msg for k in ['課', '上課', '課程', '瑜珈', '有氧', '游泳', '健身', '運動']):
+            return True
+
+        # 4) 課程代碼信號（英數混合碼）
+        try:
+            if hasattr(self, 'vector_store') and self.vector_store:
+                codes = self.vector_store._extract_course_codes(msg)
+                if codes:
+                    return True
+        except Exception:
+            pass
+
+        return False
     
     def _generate_chat_response(self, user_message: str, context: Dict[str, Any]) -> str:
-        """生成聊天回應"""
+        """生成聊天回應（非課程查詢時）。嚴禁捏造課程/風格/線上實體等資訊。"""
         try:
-            # 構建聊天提示
-            system_prompt = """你是一個友善的AI課程推薦助手。你可以：
-1. 推薦和介紹各種課程
-2. 回答關於課程的問題  
-3. 進行日常聊天
-4. 記住對話歷史並保持連貫性
-
-請用繁體中文回應，保持友善和專業的語調。如果用戶沒有明確要求課程推薦，可以進行一般對話，但要適時引導到課程相關話題。"""
+            # 構建聊天提示（非課程情境下，禁止提及具體課名/老師/風格/線上實體）
+            system_prompt = """你是一個友善的AI課程推薦助手，現在是一般聊天情境：
+1) 不要提及、舉例或推薦任何具體的課程名稱、老師姓名、課程風格（如哈達/流/陰瑜珈等）或上課型態（線上/實體）。
+2) 若對方主動詢問課程，請引導他簡述需求（時段/星期/老師/價格/類別），並說明你將根據「我們場館的現有課程」來推薦；在未檢索前仍不要說任何具體課名。
+3) 用繁體中文、自然友善、簡短回應。
+4) 如果話題與課程無關，就正常閒聊，但避免產出可能被誤解為我們場館提供的服務/課程資訊。
+"""
 
             # 構建對話歷史
             chat_history = []
@@ -828,12 +903,21 @@ class RAGSystem:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.8,
-                max_tokens=800,
+                temperature=0.2,
+                max_tokens=300,
                 top_p=0.9
             )
             
-            return response.choices[0].message.content.strip()
+            text = response.choices[0].message.content.strip()
+            # 最後防呆：移除常見禁詞，避免誤導
+            banned_terms = [
+                "線上", "線上課", "實體", "線下", "遠距",
+                "哈達", "流瑜伽", "流瑜珈", "陰瑜伽", "陰瑜珈", "阿斯坦加", "艾揚格", "熱瑜珈"
+            ]
+            for bt in banned_terms:
+                if bt in text:
+                    text = text.replace(bt, "")
+            return text
             
         except Exception as e:
             logger.error(f"生成聊天回應失敗: {e}")

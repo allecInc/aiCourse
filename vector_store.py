@@ -125,23 +125,60 @@ class VectorStore:
                 return []
             
             k = k or self.config.RETRIEVAL_K
+            # 抽取使用者對『上課週次（星期幾）』與『時段（早/午/晚）』的偏好
+            weekday_filter = self._extract_weekday_filter(query)
+            time_bucket = self._extract_time_bucket(query)
             
-            # 先執行向量檢索
-            vector_results = self._vector_search(query, k)
+            # 0) 若查詢中包含課程代碼，優先以代碼精準匹配
+            course_codes = self._extract_course_codes(query)
+            if course_codes:
+                logger.info(f"偵測到課程代碼查詢: {course_codes}")
+                code_results = self._search_by_course_code(course_codes, k)
+                if weekday_filter:
+                    code_results = self._filter_by_weekday(code_results, weekday_filter)
+                if time_bucket:
+                    code_results = self._filter_by_time(code_results, time_bucket)
+                if code_results:
+                    logger.info(f"課程代碼匹配找到 {len(code_results)} 筆結果")
+                    return code_results[:k]
+            
+            # 先執行向量檢索（保留未過濾版本供匱乏時回退）
+            vector_results_raw = self._vector_search(query, k)
+            vector_results = vector_results_raw
+            if weekday_filter:
+                vector_results = self._filter_by_weekday(vector_results, weekday_filter)
+            if time_bucket:
+                vector_results = self._filter_by_time(vector_results, time_bucket)
             
             # 檢查是否需要關鍵詞回退
             if self._should_use_keyword_fallback(query, vector_results):
                 logger.info(f"查詢: '{query}' 向量檢索效果不佳，使用關鍵詞搜索補充")
-                keyword_results = self._keyword_search(query, k)
+                keyword_results_raw = self._keyword_search(query, k)
+                keyword_results = keyword_results_raw
+                if weekday_filter:
+                    keyword_results = self._filter_by_weekday(keyword_results, weekday_filter)
+                if time_bucket:
+                    keyword_results = self._filter_by_time(keyword_results, time_bucket)
                 
                 # 合併結果
                 all_results = self._merge_results(vector_results, keyword_results, k)
                 logger.info(f"查詢: '{query}' 混合搜索找到 {len(all_results)} 個相似課程")
                 
                 # 如果混合搜索仍然沒有結果，至少返回向量搜索的結果
-                if not all_results and vector_results:
-                    logger.info(f"混合搜索無結果，返回向量搜索結果: {len(vector_results)} 個課程")
-                    return vector_results
+                if not all_results:
+                    # 優先回退到未過濾的向量結果，再不行回退未過濾的關鍵詞結果
+                    if vector_results:
+                        logger.info(f"混合搜索無結果，返回已過濾的向量結果: {len(vector_results)} 個課程")
+                        return vector_results
+                    if vector_results_raw:
+                        logger.info(f"混合搜索無結果，返回未過濾的向量結果: {len(vector_results_raw)} 個課程")
+                        return vector_results_raw[:k]
+                    if keyword_results:
+                        logger.info(f"混合搜索無結果，返回已過濾的關鍵詞結果: {len(keyword_results)} 個課程")
+                        return keyword_results
+                    if keyword_results_raw:
+                        logger.info(f"混合搜索無結果，返回未過濾的關鍵詞結果: {len(keyword_results_raw)} 個課程")
+                        return keyword_results_raw[:k]
                 
                 return all_results
             
@@ -150,6 +187,166 @@ class VectorStore:
             
         except Exception as e:
             logger.error(f"搜尋相似課程失敗: {e}")
+            return []
+
+    def _extract_time_bucket(self, query: str) -> str:
+        """從查詢中抽取時段偏好：morning/afternoon/evening 或空字串"""
+        if not query:
+            return ""
+        q = str(query)
+        if any(w in q for w in ["下午", "午后", "午後", "中午"]):
+            return 'afternoon'
+        if any(w in q for w in ["早上", "上午", "清晨"]):
+            return 'morning'
+        if "晚上" in q or "夜間" in q:
+            return 'evening'
+        return ""
+
+    def _filter_by_time(self, results: List[Dict[str, Any]], bucket: str) -> List[Dict[str, Any]]:
+        """以『上課時間』欄位過濾結果。格式 HH:MM；
+        morning: <12:00, afternoon: 12:00–17:59, evening: >=18:00
+        """
+        if not results or not bucket:
+            return results
+        filtered = []
+        for r in results:
+            t = (r.get('metadata') or {}).get('meta_上課時間')
+            try:
+                if not t or ":" not in t:
+                    continue
+                hh, mm = t.split(":")
+                mins = int(hh) * 60 + int(mm)
+                ok = False
+                if bucket == 'morning':
+                    ok = mins < 12 * 60
+                elif bucket == 'afternoon':
+                    ok = 12 * 60 <= mins < 18 * 60
+                elif bucket == 'evening':
+                    ok = mins >= 18 * 60
+                if ok:
+                    filtered.append(r)
+            except:
+                continue
+        return filtered
+
+    def _extract_weekday_filter(self, query: str) -> List[int]:
+        """從查詢中抽取星期過濾（1=週一 ... 7=週日；稍後會映射為資料格式 [0=日, 6=六]）。
+        支援：星期/週/周/禮拜、一到日、中文字數字與阿拉伯數字、平日/週末。
+        """
+        import re
+        if not query:
+            return []
+        q = query.strip()
+        days = set()
+
+        # 關鍵詞對應
+        mapping = {
+            '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7
+        }
+        # 週一/星期一/禮拜一 等
+        for zh, num in mapping.items():
+            if re.search(rf"(週|周|星期|禮拜){zh}", q):
+                days.add(num)
+
+        # 直接出現阿拉伯數字 1-7 並與週關鍵詞相鄰（避免把課程代碼當成星期）
+        for m in re.finditer(r"(週|周|星期|禮拜)\s*([1-7])", q):
+            days.add(int(m.group(2)))
+
+        # 平日 / 週末
+        if any(t in q for t in ["平日", "工作日"]):
+            days.update([1, 2, 3, 4, 5])
+        if any(t in q for t in ["週末", "周末", "假日"]):
+            days.update([6, 7])
+
+        # 形如「一三五、246」的簡寫（需與週關鍵詞同句較安全）
+        if re.search(r"(週|周|星期|禮拜)", q):
+            # 中文數字連寫
+            for group in re.findall(r"[一二三四五六日天]{2,}", q):
+                for ch in group:
+                    if ch in mapping:
+                        days.add(mapping[ch])
+            # 阿拉伯數字連寫
+            for group in re.findall(r"[1-7]{2,}", q):
+                for ch in group:
+                    days.add(int(ch))
+
+        return sorted(days)
+
+    def _filter_by_weekday(self, results: List[Dict[str, Any]], days: List[int]) -> List[Dict[str, Any]]:
+        """以『上課週次』欄位過濾結果。
+        資料格式為 [0]=週日, [1]=週一, ... [6]=週六（例如 "[1][3][5]" 或 "無"）。
+        傳入的 days 採 1..7（7 表示週日），此處會轉成 0..6 token 比對。
+        """
+        if not results or not days:
+            return results
+        filtered = []
+        # 映射：1..6 -> 1..6；7(週日) -> 0
+        token_ids = [(d % 7) for d in days]
+        day_tokens = [f"[{d}]" for d in token_ids]
+        for r in results:
+            wd = (r.get('metadata') or {}).get('meta_上課週次')
+            if not wd or wd == '無':
+                continue
+            if any(tok in str(wd) for tok in day_tokens):
+                filtered.append(r)
+        return filtered
+
+    def _extract_course_codes(self, query: str) -> List[str]:
+        """從查詢中抽取可能的課程代碼（英數混合），避免把純文字當作代碼"""
+        import re
+        if not query:
+            return []
+        # 代碼規則：包含至少1個數字與1個字母，長度>=3（例：114A47、A12、ABC123）
+        tokens = re.findall(r"[A-Za-z0-9-]+", query)
+        codes = []
+        for t in tokens:
+            if len(t) >= 3 and re.search(r"[A-Za-z]", t) and re.search(r"\d", t):
+                codes.append(t.upper())
+        # 去重
+        return list(dict.fromkeys(codes))
+
+    def _search_by_course_code(self, codes: List[str], k: int) -> List[Dict[str, Any]]:
+        """以課程代碼（精準或包含）搜尋課程，回傳高分結果"""
+        try:
+            data = self.collection.get()
+            ids = data.get('ids') or []
+            metadatas = data.get('metadatas') or []
+            documents = data.get('documents') or []
+            if not ids:
+                return []
+
+            results = []
+            upper_codes = {c.upper() for c in codes}
+            for i in range(len(ids)):
+                md = metadatas[i] or {}
+                doc = documents[i] if i < len(documents) else ''
+                title = md.get('title', '')
+                category = md.get('category', '')
+                desc = md.get('description', '')
+                code = (md.get('meta_課程代碼') or '').upper()
+                score = 0.0
+                if code:
+                    if code in upper_codes:
+                        score = 1.0  # 精準命中
+                    elif any(c in code for c in upper_codes):
+                        score = 0.95  # 包含命中
+                if score > 0:
+                    results.append({
+                        'id': ids[i],
+                        'title': title,
+                        'category': category,
+                        'description': desc,
+                        'similarity_score': score,
+                        'document': doc,
+                        'metadata': md,
+                        'search_type': 'code'
+                    })
+
+            # 排序與截取
+            results.sort(key=lambda x: x['similarity_score'], reverse=True)
+            return results[:k]
+        except Exception as e:
+            logger.error(f"課程代碼搜尋失敗: {e}")
             return []
     
     def _vector_search(self, query: str, k: int) -> List[Dict[str, Any]]:

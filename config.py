@@ -16,11 +16,31 @@ class Config:
     COLLECTION_NAME = "ai_courses"
     
     # 嵌入模型設定
-    EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+    # 改為多語模型以提升中文檢索品質
+    EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     
     # 檢索設定
     RETRIEVAL_K = 5  # 檢索相似課程數量
-    SIMILARITY_THRESHOLD = 0.1  # 相似度閾值 (設定很低以確保找到所有相關課程)
+    # 提升閾值降低噪音（建議 0.6~0.8）
+    SIMILARITY_THRESHOLD = 0.7
+
+    # 觸發檢索的關鍵詞（可透過 .env 覆寫，逗號分隔）
+    COURSE_TRIGGER_VERBS = os.getenv(
+        'COURSE_TRIGGER_VERBS',
+        '學,學習,想學,想上,想報名,想參加'
+    )
+    COURSE_TRIGGER_KEYWORDS = os.getenv(
+        'COURSE_TRIGGER_KEYWORDS',
+        '課程,課,推薦,上課,報名,訓練,瑜珈,瑜伽,有氧,游泳,健身,運動,舞蹈,拳擊,飛輪,皮拉提斯,球類,拉丁,爵士,街舞,芭蕾,伸展,核心,TRX,壺鈴,太極,氣功,設計'
+    )
+    COURSE_TRIGGER_TIME_SIGNALS = os.getenv(
+        'COURSE_TRIGGER_TIME_SIGNALS',
+        '早上,上午,中午,下午,晚上,夜間'
+    )
+    COURSE_TRIGGER_WEEK_SIGNALS = os.getenv(
+        'COURSE_TRIGGER_WEEK_SIGNALS',
+        '週,周,星期,禮拜'
+    )
     
     # 課程文件路徑 (已由資料庫取代)
     COURSE_DATA_PATH = "AI課程.json"

@@ -159,145 +159,33 @@ def main():
     with st.sidebar:
         st.header("⚙️ 系統設定")
         
-        # 檔案上傳功能
-        st.subheader("📁 檔案上傳")
-        uploaded_file = st.file_uploader(
-            "上傳新的課程資料檔案",
-            type=['json'],
-            help="請上傳新的 AI課程.json 檔案來更新課程資料"
+        # API 金鑰設定（從 session/.env/Config 自動帶入預設值）
+        placeholder = 'your_openai_api_key_here'
+        env_api = os.getenv('OPENAI_API_KEY', '')
+        config_api = getattr(rag_system.config, 'OPENAI_API_KEY', '') if rag_system else ''
+        default_api_key = (
+            st.session_state.get('api_key')
+            or (env_api if env_api else '')
+            or (config_api if config_api and config_api != placeholder else '')
         )
-        
-        if uploaded_file is not None:
-            try:
-                # 讀取上傳的檔案內容
-                file_content = uploaded_file.read()
-                
-                # 驗證JSON格式
-                import json
-                json_data = json.loads(file_content.decode('utf-8'))
-                
-                # 顯示檔案資訊
-                st.success(f"✅ 檔案讀取成功")
-                st.info(f"📄 檔案名稱: {uploaded_file.name}")
-                st.info(f"📊 檔案大小: {len(file_content)} bytes")
-                
-                # 嘗試計算課程數量
-                if isinstance(json_data, list):
-                    course_count = len(json_data)
-                    st.info(f"📚 包含課程數: {course_count}")
-                elif isinstance(json_data, dict) and 'courses' in json_data:
-                    course_count = len(json_data['courses'])
-                    st.info(f"📚 包含課程數: {course_count}")
-                else:
-                    st.warning("⚠️ 無法識別課程數量，請確認檔案格式")
-                
-                # 替換檔案按鈕
-                if st.button("🔄 替換現有檔案並重建資料庫", type="primary"):
-                    try:
-                        # 備份原始檔案
-                        import shutil
-                        from datetime import datetime
-                        backup_name = f"AI課程.json.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                        shutil.copy2("AI課程.json", backup_name)
-                        st.info(f"✅ 原檔案已備份為: {backup_name}")
-                        
-                        # 寫入新檔案
-                        with open("AI課程.json", "wb") as f:
-                            f.write(file_content)
-                        
-                        st.success("✅ 檔案已成功替換")
-                        
-                        # 強制重建資料庫
-                        with st.spinner("重建資料庫中..."):
-                            from auto_file_monitor import force_rebuild_database
-                            rebuild_result = force_rebuild_database()
-                            
-                            if rebuild_result['success']:
-                                st.success("✅ 資料庫重建完成！")
-                                st.balloons()  # 顯示慶祝動畫
-                                st.rerun()  # 重新載入頁面
-                            else:
-                                st.error(f"❌ 資料庫重建失敗: {rebuild_result['message']}")
-                                
-                    except Exception as e:
-                        st.error(f"❌ 檔案替換失敗: {e}")
-                        
-            except json.JSONDecodeError as e:
-                st.error(f"❌ JSON格式錯誤: {e}")
-            except Exception as e:
-                st.error(f"❌ 檔案處理失敗: {e}")
-        
-        st.divider()
-        
-        # API金鑰設定
         api_key = st.text_input(
             "OpenAI API Key",
             type="password",
-            value=st.session_state.get('api_key', ''),
-            help="請輸入您的OpenAI API金鑰"
+            value=default_api_key,
+            help="請輸入您的 OpenAI API 金鑰"
         )
-        
         if api_key:
             st.session_state['api_key'] = api_key
-            # 更新配置
             rag_system.config.OPENAI_API_KEY = api_key
             rag_system.openai_client.api_key = api_key
         
-        # 搜尋參數
-        st.subheader("🔍 搜尋設定")
-        retrieval_k = st.slider("檢索課程數量", 1, 10, 5)
-        similarity_threshold = st.slider("相似度閾值", 0.0, 1.0, 0.7, 0.1)
-        
-        # 更新配置
-        rag_system.config.RETRIEVAL_K = retrieval_k
-        rag_system.config.SIMILARITY_THRESHOLD = similarity_threshold
-        
-        # 系統統計
+        # 系統資訊（保留）
         st.subheader("📊 系統統計")
         stats = rag_system.get_system_stats()
         st.metric("總課程數", stats.get('total_courses', 0))
         st.metric("課程類別數", stats.get('total_categories', 0))
         
-        # 資料檔案資訊
-        st.subheader("📄 資料檔案資訊")
-        st.write(f"**檔案大小**: {stats.get('data_file_size', '未知')}")
-        st.write(f"**最後修改**: {stats.get('data_file_last_modified', '未知')}")
-        st.write(f"**最後檢查**: {stats.get('last_update_check', '未知')}")
-        
-        # 自動更新檢查
-        from auto_file_monitor import check_and_update_data, get_file_monitor, force_rebuild_database
-        
-        # 手動更新按鈕
-        if st.button("🔄 檢查資料更新", help="點擊檢查資料檔案是否有更新"):
-            with st.spinner("檢查資料更新中..."):
-                update_result = check_and_update_data()
-                if update_result['updated']:
-                    st.success(f"✅ {update_result['message']}")
-                    st.rerun()  # 重新載入頁面
-                else:
-                    st.info(f"ℹ️ {update_result['message']}")
-        
-        # 強制重建按鈕
-        if st.button("🔄 強制重建資料庫", help="強制重建資料庫並清理快取"):
-            with st.spinner("重建資料庫中..."):
-                rebuild_result = force_rebuild_database()
-                if rebuild_result['success']:
-                    st.success(f"✅ {rebuild_result['message']}")
-                    st.rerun()
-                else:
-                    st.error(f"❌ {rebuild_result['message']}")
-        
-        # 顯示所有類別
-        if st.checkbox("顯示所有類別"):
-            categories = stats.get('categories', [])
-            for category in categories:
-                st.write(f"• {category}")
-        
-        # 快取清理選項
-        st.divider()
-        if st.button("🔄 清理快取並重新載入", help="如果遇到方法錯誤，點擊此按鈕清理快取"):
-            st.cache_resource.clear()
-            st.rerun()
+        # 已移除「資料檔案資訊」區塊，僅保留必要設定與統計
     
     # 主要內容區域
     tab1, tab2, tab3, tab4 = st.tabs(["💬 AI聊天室", "📜 對話記錄", "📚 瀏覽課程", "ℹ️ 關於系統"])
