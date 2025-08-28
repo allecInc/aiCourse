@@ -464,55 +464,77 @@ class RAGSystem:
             return "抱歉，生成推薦時發生錯誤。請稍後再試。"
     
     def get_course_recommendation(self, query: str, k: int = None, session_id: str = None) -> Dict[str, Any]:
-        """獲取課程推薦（完整流程）"""
+        """獲取課程推薦（完整流程）- MODIFIED: 使用全量課程進行推薦"""
         try:
-            logger.info(f"開始處理查詢: {query}")
+            logger.info(f"開始處理查詢 (全量模式): {query}")
             
-            # 如果有會話ID，使用對話上下文優化查詢
+            # 如果有會話ID，記錄用戶查詢
             if session_id:
-                refined_query = self.conversation_manager.get_refined_query(session_id, query)
-                logger.info(f"原始查詢: {query}")
-                logger.info(f"優化查詢: {refined_query}")
-                # 記錄用戶查詢
                 self.conversation_manager.add_message(session_id, "user_query", query)
-            else:
-                refined_query = query
+
+            # 1. MODIFIED: 獲取所有課程，而不是檢索相關課程
+            logger.info("正在加載所有課程資料...")
+            # 使用 course_processor 準備好的數據格式
+            all_courses = self.course_processor.prepare_for_vectorization()
             
-            # 1. 檢索相關課程
-            retrieved_courses = self.retrieve_relevant_courses(refined_query, k)
-            
-            if not retrieved_courses:
+            # 為了與 generate_course_recommendation 的輸入格式保持一致，
+            # 我們手動添加一個假的 similarity_score
+            courses_for_generation = []
+            for course in all_courses:
+                course_copy = course.copy()
+                course_copy['similarity_score'] = 1.0 # 添加假的相似度分數
+                courses_for_generation.append(course_copy)
+
+            logger.info(f"已加載 {len(courses_for_generation)} 門課程送交 AI 進行分析。")
+
+            # --- NEW: Log the data of each course being sent to the AI ---
+            logger.info("--- 開始記錄本次推薦使用的所有課程資料 ---")
+            for course in courses_for_generation:
+                metadata = course.get('metadata', {})
+                logger.info(
+                    f"  - 課程: {course.get('title', 'N/A')} | "
+                    f"代碼: {metadata.get('課程代碼', 'N/A')} | "
+                    f"教師: {metadata.get('授課教師', 'N/A')} | "
+                    f"費用: {metadata.get('課程費用', 'N/A')}"
+                )
+            logger.info("--- 課程資料記錄完畢 ---")
+            # ---------------------------------------------------------
+
+            if not courses_for_generation:
                 return {
                     'query': query,
                     'retrieved_courses': [],
-                    'recommendation': "抱歉，我找不到符合您需求的課程。請嘗試用不同的關鍵字搜尋，例如：'有氧運動'、'瑜珈'、'游泳'、'球類運動'等。",
+                    'recommendation': "抱歉，課程資料庫目前是空的，我無法提供任何推薦。",
                     'success': False
                 }
             
-            # 2. 生成推薦
-            recommendation = self.generate_course_recommendation(query, retrieved_courses, session_id)
+            # 2. 生成推薦 (傳入所有課程)
+            # 警告: 這會非常慢且昂貴
+            logger.warning("正在將所有課程發送給 AI，這可能會很慢且昂貴。")
+            recommendation = self.generate_course_recommendation(query, courses_for_generation, session_id)
             
             # 記錄系統回應
             if session_id:
                 self.conversation_manager.add_message(
                     session_id, "system_response", recommendation, 
-                    courses=retrieved_courses
+                    courses=courses_for_generation # 記錄所有課程
                 )
             
             return {
                 'query': query,
-                'retrieved_courses': retrieved_courses,
+                # 在 retrieved_courses 中返回所有課程，以便調試
+                'retrieved_courses': courses_for_generation,
                 'recommendation': recommendation,
                 'success': True,
                 'session_id': session_id
             }
             
         except Exception as e:
-            logger.error(f"獲取課程推薦失敗: {e}")
+            logger.error(f"獲取課程推薦失敗 (全量模式): {e}")
             return {
                 'query': query,
                 'retrieved_courses': [],
-                'recommendation': f"系統發生錯誤: {str(e)}",
+                'recommendation': f"系統發生錯誤 (全量模式): {str(e)}",
                 'success': False
             }
     
@@ -675,22 +697,17 @@ class RAGSystem:
             is_course_query = self._is_course_related_query(refined_query)
             
             if is_course_query:
-                # 如果是課程相關查詢，使用新的 AI-SQL 功能
-                logger.info(f"使用 AI-SQL 查詢處理課程問題: {refined_query}")
-                courses = self.query_database_with_ai(refined_query)
+                # 如果是課程相關查詢，使用 get_course_recommendation 進行處理
+                logger.info(f"使用 get_course_recommendation 處理課程問題: {refined_query}")
                 
-                if courses:
-                    # 將課程列表格式化成文字回應
-                    course_list = "\n".join([f"- {c['title']} ({c['category']})" for c in courses])
-                    ai_response = f"我根據您的需求，找到了 {len(courses)} 門相關課程：\n{course_list}"
-                else:
-                    # 找不到課程，生成澄清問題
-                    ai_response = self.generate_clarifying_question(refined_query)
+                # 呼叫我們修改過的 RAG 函式
+                # 注意: get_course_recommendation 內部已經記錄了 user_query，所以這裡不用重複記錄
+                recommendation_result = self.get_course_recommendation(refined_query, session_id=session_id)
                 
-                # 記錄AI回應
-                self.conversation_manager.add_message(
-                    session_id, "ai_response", ai_response, courses=courses
-                )
+                ai_response = recommendation_result['recommendation']
+                courses = recommendation_result['retrieved_courses']
+                
+                # 注意：推薦和訊息記錄已在 get_course_recommendation 內部完成，此處無需重複
             else:
                 # 如果是一般聊天，使用原有的聊天回應生成邏輯
                 context = self.conversation_manager.get_conversation_context(session_id)
@@ -877,29 +894,28 @@ class RAGSystem:
         self.conversation_manager.clear_session(session_id)
     
     def process_user_query_for_existing_message(self, session_id: str, user_message: str) -> Dict[str, Any]:
-        """處理已存在的用戶消息 - 使用 AI-SQL 查詢"""
+        """處理已存在的用戶消息 - NOW USES RAG"""
         try:
             is_course_query = self._is_course_related_query(user_message)
             
             if is_course_query:
-                logger.info(f"使用 AI-SQL 查詢處理課程問題: {user_message}")
-                courses = self.query_database_with_ai(user_message)
+                logger.info(f"使用 get_course_recommendation 處理課程問題: {user_message}")
                 
-                if courses:
-                    # 將課程列表格式化成文字回應
-                    course_list = "\n".join([f"- {c['title']} ({c['category']})" for c in courses])
-                    ai_response = f"我根據您的需求，找到了 {len(courses)} 門相關課程：\n{course_list}"
-                else:
-                    # 找不到課程，生成澄清問題
-                    ai_response = self.generate_clarifying_question(user_message)
+                # 呼叫我們修改過的 RAG 函式
+                recommendation_result = self.get_course_recommendation(user_message, session_id=session_id)
+                
+                ai_response = recommendation_result['recommendation']
+                courses = recommendation_result['retrieved_courses']
+                
+                # 注意：推薦和訊息記錄已在 get_course_recommendation 內部完成
             else:
                 context = self.conversation_manager.get_conversation_context(session_id)
                 ai_response = self._generate_chat_response(user_message, context)
                 courses = []
-            
-            self.conversation_manager.add_message(
-                session_id, "ai_response", ai_response, courses=courses
-            )
+                # 為非課程相關的回應記錄訊息
+                self.conversation_manager.add_message(
+                    session_id, "ai_response", ai_response, courses=courses
+                )
             
             return {
                 'success': True,
