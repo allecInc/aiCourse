@@ -9,7 +9,7 @@ class Config:
     
     # OpenAI 設定
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', 'your_openai_api_key_here')
-    MODEL_NAME = "gpt-4.1-mini"  # GPT-4.1 mini
+    MODEL_NAME = "gpt-5-mini"  # 預設模型（可用 .env 覆寫）
     
     # 向量數據庫設定
     VECTOR_DB_PATH = "./chroma_db"

@@ -23,13 +23,9 @@ def main():
     try:
         logger.info("開始初始化AI課程推薦系統...")
         
-        # 檢查課程文件是否存在
+        # 以 SQL Server 為主的初始化流程
         config = Config()
-        if not os.path.exists(config.COURSE_DATA_PATH):
-            logger.error(f"找不到課程數據文件: {config.COURSE_DATA_PATH}")
-            print(f"❌ 錯誤：找不到課程數據文件 '{config.COURSE_DATA_PATH}'")
-            print("請確保 AI課程.json 文件在當前目錄下")
-            sys.exit(1)
+        print("📡 將從 SQL Server 載入課程資料並建立向量庫（如需連線請先設定 .env）")
         
         print("🚀 正在初始化AI課程推薦系統...")
         print("=" * 50)
@@ -39,7 +35,7 @@ def main():
         rag_system = RAGSystem(config)
         
         print("🔧 初始化向量數據庫...")
-        print("📚 載入課程數據...")
+        print("📚 載入課程數據（SQL Server）...")
         
         # 強制重建知識庫
         rag_system.initialize_knowledge_base(force_rebuild=True)

@@ -1,4 +1,4 @@
-import openai
+from openai import OpenAI
 import pyodbc
 from typing import List, Dict, Any, Optional
 import logging
@@ -29,9 +29,8 @@ class RAGSystem:
     def setup_system(self):
         """初始化RAG系統"""
         try:
-            # 設定OpenAI API
-            openai.api_key = self.config.OPENAI_API_KEY
-            self.openai_client = openai.OpenAI(api_key=self.config.OPENAI_API_KEY)
+            # 設定 OpenAI v1 客戶端
+            self.openai_client = OpenAI(api_key=self.config.OPENAI_API_KEY)
             
             # 初始化課程處理器
             self.course_processor = CourseProcessor()

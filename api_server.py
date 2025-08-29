@@ -10,6 +10,7 @@ import uvicorn
 from contextlib import asynccontextmanager
 
 from config import Config
+from openai import OpenAI
 from rag_system import RAGSystem
 
 # 設定日誌
@@ -143,7 +144,11 @@ async def recommend_courses(request: CourseRecommendationRequest):
         # 如果提供了API密鑰，則更新配置
         if request.api_key:
             rag_system.config.OPENAI_API_KEY = request.api_key
-            rag_system.openai_client.api_key = request.api_key
+            # 以請求提供的 Key 重新建立 OpenAI 客戶端（v1 寫法）
+            try:
+                rag_system.openai_client = OpenAI(api_key=request.api_key)
+            except Exception:
+                pass
         
         # 檢查API密鑰
         if not rag_system.config.OPENAI_API_KEY:
@@ -246,7 +251,7 @@ async def get_system_stats():
             total_courses=stats.get('total_courses', 0),
             total_categories=stats.get('total_categories', 0),
             categories=stats.get('categories', []),
-            model_name=stats.get('model_name', 'GPT-4o-mini'),
+            model_name=stats.get('model_name', 'gpt-5-mini'),
             embedding_model=stats.get('embedding_model', 'sentence-transformers'),
             system_status="ready",
             last_updated=datetime.now().isoformat()

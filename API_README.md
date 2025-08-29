@@ -10,11 +10,17 @@
 pip install -r requirements.txt
 ```
 
-### 2. 設定環境變數（可選）
+### 2. 設定環境變數（OpenAI 與 SQL Server）
 
-創建 `.env` 檔案：
+在專案根目錄建立 `.env` 檔案：
 ```
 OPENAI_API_KEY=your-openai-api-key-here
+DB_DRIVER={ODBC Driver 17 for SQL Server}
+DB_SERVER=your_server.database.windows.net
+DB_DATABASE=your_database_name
+DB_USER=your_username
+DB_PASSWORD=your_password
+DB_TABLE=courses
 ```
 
 ### 3. 啟動API服務
@@ -169,10 +175,16 @@ for course in courses['courses']:
 | 變數名 | 描述 | 預設值 |
 |--------|------|--------|
 | `OPENAI_API_KEY` | OpenAI API密鑰 | 無 |
-| `MODEL_NAME` | OpenAI模型名稱 | gpt-4o-mini |
+| `MODEL_NAME` | OpenAI模型名稱 | gpt-5-mini |
 | `EMBEDDING_MODEL` | 嵌入模型 | sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 |
 | `RETRIEVAL_K` | 預設檢索數量 | 5 |
 | `SIMILARITY_THRESHOLD` | 相似度閾值 | 0.7 |
+| `DB_DRIVER` | ODBC Driver | {ODBC Driver 17 for SQL Server} |
+| `DB_SERVER` | SQL Server 主機 | 無 |
+| `DB_DATABASE` | 資料庫名稱 | 無 |
+| `DB_USER` | 資料庫帳號 | 無 |
+| `DB_PASSWORD` | 資料庫密碼 | 無 |
+| `DB_TABLE` | 課程資料表名（參考） | courses |
 
 ### API參數
 

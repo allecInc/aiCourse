@@ -4,6 +4,7 @@ from typing import Dict, Any
 import logging
 import os
 from config import Config
+from openai import OpenAI
 from rag_system import RAGSystem
 
 # 設定頁面配置
@@ -177,7 +178,11 @@ def main():
         if api_key:
             st.session_state['api_key'] = api_key
             rag_system.config.OPENAI_API_KEY = api_key
-            rag_system.openai_client.api_key = api_key
+            # 以新 Key 重新建立 OpenAI 客戶端（v1 寫法）
+            try:
+                rag_system.openai_client = OpenAI(api_key=api_key)
+            except Exception as _:
+                pass
         
         # 系統資訊（保留）
         st.subheader("📊 系統統計")
@@ -573,7 +578,7 @@ def main():
         with col2:
             st.subheader("⚙️ 技術架構")
             st.write(f"""
-            - **LLM模型**: {stats.get('model_name', 'GPT-4o-mini')}
+            - **LLM模型**: {stats.get('model_name', 'gpt-5-mini')}
             - **嵌入模型**: {stats.get('embedding_model', 'sentence-transformers')}
             - **向量數據庫**: ChromaDB
             - **檢索增強**: RAG (Retrieval-Augmented Generation)
